@@ -1,6 +1,9 @@
 import os
 import pyodbc
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+
+# India Standard Time = UTC + 5:30
+IST = timezone(timedelta(hours=5, minutes=30))
 
 # ─────────────────────────────────────────────
 # CONSTANTS
@@ -71,7 +74,7 @@ def get_check_slots():
       Primary = 9:30 AM - 10:00 AM
       Safety  = 9:00 AM - 9:30 AM
     """
-    now  = datetime.now().replace(second=0, microsecond=0)
+    now  = datetime.now(IST).replace(second=0, microsecond=0, tzinfo=None)
     mins = 0 if now.minute < 30 else 30
     run_time = now.replace(minute=mins)
 
@@ -97,7 +100,7 @@ def slot_label(start, end):
 
 def get_baseline_dates(slot_start):
     """Return last 8 dates with same weekday as today."""
-    today   = date.today()
+    today   = datetime.now(IST).date()
     weekday = today.weekday()
     dates   = []
     weeks   = 0
@@ -126,10 +129,10 @@ def smart_baseline(vals):
 # MAIN
 # ─────────────────────────────────────────────
 def run():
-    today_str = date.today().strftime("%Y-%m-%d")
+    today_str = datetime.now(IST).strftime("%Y-%m-%d")
     slots     = get_check_slots()
 
-    print(f"Surge Watchdog running at {datetime.now().strftime('%d-%b-%Y %H:%M')}")
+    print(f"Surge Watchdog running at {datetime.now(IST).strftime('%d-%b-%Y %H:%M')} IST")
     for s, e in slots:
         print(f"  Checking: {slot_label(s, e)}")
 
