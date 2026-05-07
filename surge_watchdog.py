@@ -1,7 +1,6 @@
 import os
 import json
 import pyodbc
-import urllib.request
 from datetime import date, datetime, timedelta, timezone
 
 # ─────────────────────────────────────────────
@@ -10,9 +9,12 @@ from datetime import date, datetime, timedelta, timezone
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # ─────────────────────────────────────────────
-# FALLBACK CONSTANTS
-# Used only if config.json is missing
+# CONSTANTS
 # ─────────────────────────────────────────────
+TOP_ARTICLES = 5
+FLAGS_FILE   = "flagged_today.json"
+CONFIG_FILE  = "config.json"
+
 DEFAULT_THRESHOLDS = {
     "spike_ratio":         1.5,
     "spike_min_orders":    100,
@@ -20,10 +22,6 @@ DEFAULT_THRESHOLDS = {
     "discount_min_pct":    70,
     "discount_min_orders": 5,
 }
-
-TOP_ARTICLES = 5
-FLAGS_FILE   = "flagged_today.json"
-CONFIG_URL   = "https://raw.githubusercontent.com/DivyadarshanJi/Divy-PumaEcom-Config/main/config.json"
 
 # ─────────────────────────────────────────────
 # CHANNEL → PLATFORM MAP
@@ -54,45 +52,61 @@ CHANNEL_FILTER = "p.sales_channel IN ({})".format(
 )
 
 # ─────────────────────────────────────────────
-# LOAD CONFIG
-# Reads config.json from repo
-# Falls back to defaults if missing
+# LOAD CONFIG  (local file)
 # ─────────────────────────────────────────────
 def load_config():
-    """
-    Fetches config.json from public GitHub repo.
-    Falls back to defaults if fetch fails.
-    """
-    try:
-        with urllib.request.urlopen(CONFIG_URL, timeout=10) as resp:
-            cfg = json.loads(resp.read().decode("utf-8"))
-        print(f"Config loaded from: {CONFIG_URL}")
-    except Exception as e:
-        print(f"WARNING: Could not fetch config.json ({e}). Using defaults.")
+    if not os.path.exists(CONFIG_FILE):
+        print("WARNING: config.json not found. Using defaults.")
         return {
-            "global":    DEFAULT_THRESHOLDS.copy(),
-            "platforms": {},
-            "cc_all":    ""
+            "cc_all":      [],
+            "spoc_emails": {},
+            "thresholds":  {"_default": DEFAULT_THRESHOLDS.copy()}
         }
-
-    # Ensure all global threshold keys exist
-    for k, v in DEFAULT_THRESHOLDS.items():
-        if k not in cfg.get("global", {}):
-            cfg.setdefault("global", {})[k] = v
-
+    with open(CONFIG_FILE, "r") as f:
+        cfg = json.load(f)
+    print("Config loaded from config.json")
     return cfg
+
+# ─────────────────────────────────────────────
+# CONFIG HELPERS
+# ─────────────────────────────────────────────
+def to_list(val):
+    """Converts single email string or list to a clean list."""
+    if not val:
+        return []
+    if isinstance(val, list):
+        return [e.strip() for e in val if e.strip()]
+    return [val.strip()] if val.strip() else []
+
+def get_cc_emails(cfg):
+    """Returns cc_all as a list."""
+    return to_list(cfg.get("cc_all", []))
+
+def get_platform_emails(cfg, platform):
+    """
+    Returns (to_list, cc_list) for a platform.
+    If platform has no SPOC → to_list is empty, falls back to cc_all.
+    """
+    spoc = to_list(cfg.get("spoc_emails", {}).get(platform, ""))
+    cc   = get_cc_emails(cfg)
+    if not spoc:
+        # No SPOC → send to cc_all only
+        return cc, []
+    return spoc, cc
 
 def get_platform_thresholds(cfg, platform):
     """
-    Returns thresholds for a specific platform.
-    If platform has use_global=True (or no custom settings),
-    returns global thresholds.
+    Returns thresholds for a platform.
+    use_global=true → use _default values
+    use_global=false → use platform specific values
     """
-    plat_cfg = cfg.get("platforms", {}).get(platform, {})
-    if plat_cfg.get("use_global", True):
-        t = cfg["global"]
+    default = cfg.get("thresholds", {}).get("_default", DEFAULT_THRESHOLDS)
+    plat    = cfg.get("thresholds", {}).get(platform, {})
+
+    if plat.get("use_global", True):
+        t = default
     else:
-        t = plat_cfg
+        t = plat
 
     return {
         "spike_ratio":         float(t.get("spike_ratio",         DEFAULT_THRESHOLDS["spike_ratio"])),
@@ -101,13 +115,6 @@ def get_platform_thresholds(cfg, platform):
         "discount_min_pct":    float(t.get("discount_min_pct",     DEFAULT_THRESHOLDS["discount_min_pct"])) / 100,
         "discount_min_orders": int(t.get("discount_min_orders",    DEFAULT_THRESHOLDS["discount_min_orders"])),
     }
-
-def get_platform_spoc(cfg, platform):
-    """Returns SPOC email for a platform. Empty string if not set."""
-    return cfg.get("platforms", {}).get(platform, {}).get("spoc_email", "")
-
-def get_cc_email(cfg):
-    return cfg.get("global", {}).get("cc_all", "") or cfg.get("cc_all", "")
 
 # ─────────────────────────────────────────────
 # DB CONNECTION
@@ -134,11 +141,6 @@ def today_ist():
     return now_ist().date()
 
 def get_check_slots():
-    """
-    Run at X IST:
-      Primary = X-1hr   to X-30min
-      Safety  = X-1.5hr to X-1hr
-    """
     now      = now_ist().replace(second=0, microsecond=0, tzinfo=None)
     mins     = 0 if now.minute < 30 else 30
     run_time = now.replace(minute=mins)
@@ -173,7 +175,6 @@ def get_baseline_dates():
 
 # ─────────────────────────────────────────────
 # SMART BASELINE
-# Drop highest + lowest, average remaining 6
 # ─────────────────────────────────────────────
 def smart_baseline(vals, min_weeks=3):
     non_zero = sum(1 for v in vals if v > 0)
@@ -220,13 +221,9 @@ def s1_row_line(r, w):
     )
 
 # ─────────────────────────────────────────────
-# BUILD EMAIL BODY FOR ONE PLATFORM
+# BUILD EMAIL BODY
 # ─────────────────────────────────────────────
 def build_platform_email(platform, new_s1, old_s1, new_disc, old_disc, run_time_str):
-    """
-    Build email body for a single platform.
-    Only includes rows relevant to that platform.
-    """
     W   = [13, 18, 7, 7, 9, 5]
     HDR = (f"{'Platform':<{W[0]}} {'Time Slot':<{W[1]}} {'Issue':<{W[2]}} "
            f"{'Orders':>{W[3]}} {'Baseline':>{W[4]}} {'Ratio':>{W[5]+1}}  "
@@ -271,11 +268,9 @@ def build_platform_email(platform, new_s1, old_s1, new_disc, old_disc, run_time_
         disc_hdr = (f"  {'Platform':<13} {'Article':<13} "
                     f"{'Orders':>10} {'Discount%':>10}  {'First Flagged'}")
         disc_sep = "  " + "-" * 65
-
         lines.append("=" * 70)
         lines.append("SECTION 2 — HIGH DISCOUNT ARTICLES")
         lines.append("")
-
         if p_new_disc:
             lines.append("  NEW FLAGS")
             lines.append(disc_sep)
@@ -288,7 +283,6 @@ def build_platform_email(platform, new_s1, old_s1, new_disc, old_disc, run_time_
                     f"{r['first_flagged']}"
                 )
             lines.append("")
-
         if p_old_disc:
             lines.append("  PAST FLAGS  (flagged earlier today — current orders shown)")
             lines.append(disc_sep)
@@ -310,16 +304,16 @@ def build_platform_email(platform, new_s1, old_s1, new_disc, old_disc, run_time_
     return "\n".join(lines)
 
 # ─────────────────────────────────────────────
-# SEND EMAIL  (placeholder — add SMTP/Graph later)
+# SEND EMAIL  (placeholder — SMTP/Graph later)
 # ─────────────────────────────────────────────
-def send_email(to_email, cc_email, subject, body):
+def send_email(to_emails, cc_emails, subject, body):
     """
-    Placeholder for email sending.
-    Will be replaced with actual SMTP/Graph API call.
+    to_emails and cc_emails are always lists.
+    Placeholder — will be replaced with real email logic.
     """
     print(f"\n--- EMAIL ---")
-    print(f"TO:      {to_email}")
-    print(f"CC:      {cc_email}")
+    print(f"TO:      {', '.join(to_emails)}")
+    print(f"CC:      {', '.join(cc_emails)}")
     print(f"SUBJECT: {subject}")
     print(body)
     print("--- END EMAIL ---\n")
@@ -328,25 +322,25 @@ def send_email(to_email, cc_email, subject, body):
 # MAIN
 # ─────────────────────────────────────────────
 def run():
-    now           = now_ist()
-    today_str     = now.strftime("%Y-%m-%d")
-    time_now      = time_label(now)
-    run_time_str  = now.strftime("%d-%b-%Y %H:%M")
-    slots         = get_check_slots()
-    base_dates    = get_baseline_dates()
-    base_in       = ",".join(f"'{d}'" for d in base_dates)
-    week_case     = (
+    now          = now_ist()
+    today_str    = now.strftime("%Y-%m-%d")
+    time_now     = time_label(now)
+    run_time_str = now.strftime("%d-%b-%Y %H:%M")
+    slots        = get_check_slots()
+    base_dates   = get_baseline_dates()
+    base_in      = ",".join(f"'{d}'" for d in base_dates)
+    week_case    = (
         "CASE CAST(p.channel_order_time AS DATE) " +
         " ".join(f"WHEN '{d}' THEN {i+1}" for i, d in enumerate(base_dates)) +
         " END"
     )
 
     # ── Load config ──
-    cfg    = load_config()
-    cc_all = get_cc_email(cfg)
+    cfg      = load_config()
+    cc_emails = get_cc_emails(cfg)
 
     print(f"Surge Watchdog running at {run_time_str} IST")
-    print(f"CC Email: {cc_all or 'not set'}")
+    print(f"CC Emails: {cc_emails or 'not set'}")
     for s, e in slots:
         print(f"  Checking slot: {slot_label(s, e)}")
 
@@ -361,7 +355,7 @@ def run():
     )
 
     # ─────────────────────────────────────────
-    # SECTION 1 — SPIKE / DOWN per slot
+    # SECTION 1 — SPIKE / DOWN
     # ─────────────────────────────────────────
     current_s1 = {}
 
@@ -370,7 +364,7 @@ def run():
         time_s = slot_start.strftime("%H:%M:%S")
         time_e = slot_end.strftime("%H:%M:%S")
 
-        # Today orders per channel
+        # Today orders
         cur.execute(f"""
             SELECT p.sales_channel,
                    SUM(p.order_qty - p.cancelled_qty) AS orders
@@ -383,7 +377,7 @@ def run():
         """)
         today_by_ch = {row[0]: float(row[1]) for row in cur.fetchall()}
 
-        # Baseline per channel per week
+        # Baseline
         cur.execute(f"""
             SELECT p.sales_channel,
                    {week_case} AS week_num,
@@ -403,7 +397,7 @@ def run():
             if ch not in base_by_ch: base_by_ch[ch] = [0.0] * 8
             base_by_ch[ch][wk] = float(row[2])
 
-        # Article orders + discount
+        # Articles
         cur.execute(f"""
             SELECT p.sales_channel,
                    TRY_CAST(LTRIM(REPLACE(UPPER(p.Style),'IN','')) AS BIGINT) AS article,
@@ -443,7 +437,7 @@ def run():
             if pname not in plat_base: plat_base[pname] = [0.0] * 8
             for i in range(8): plat_base[pname][i] += b[i]
 
-        # Spike / Down check — per platform thresholds
+        # Spike / Down
         for pname in set(CHANNEL_MAP.values()):
             tod       = plat_today.get(pname, 0.0)
             base, wks = smart_baseline(plat_base.get(pname, [0.0] * 8))
@@ -480,7 +474,7 @@ def run():
             }
 
     # ─────────────────────────────────────────
-    # SECTION 2 — HIGH DISCOUNT (full day)
+    # SECTION 2 — HIGH DISCOUNT
     # ─────────────────────────────────────────
     cur.execute(f"""
         SELECT p.sales_channel,
@@ -507,11 +501,8 @@ def run():
         disc = (1.0 - fwd / mrp) if mrp > 0 else 0.0
         if art is None: continue
         pname = CHANNEL_MAP.get(ch, ch)
-
-        # Use per-platform discount thresholds
         t = get_platform_thresholds(cfg, pname)
         if ords < t["discount_min_orders"] or disc < t["discount_min_pct"]: continue
-
         key = f"{pname}|||{art}"
         if key not in current_disc:
             current_disc[key] = {"platform": pname, "article": art, "orders": 0.0, "discount": 0.0}
@@ -521,7 +512,7 @@ def run():
     conn.close()
 
     # ─────────────────────────────────────────
-    # COMPARE WITH FLAGS FILE
+    # FLAGS
     # ─────────────────────────────────────────
     flags     = load_flags()
     past_s1   = flags.get("platform_slots", {})
@@ -556,7 +547,7 @@ def run():
             }
 
     # ─────────────────────────────────────────
-    # DECIDE WHETHER TO SEND
+    # SEND OR SKIP
     # ─────────────────────────────────────────
     has_new = bool(new_s1) or bool(new_disc)
 
@@ -572,7 +563,7 @@ def run():
         save_flags(flags)
         return False, {}
 
-    # ── Save new flags ──
+    # Save flags
     for k, v in new_s1.items():
         past_s1[k] = {
             "issue":         v["issue"],
@@ -602,9 +593,8 @@ def run():
     save_flags(flags)
 
     # ─────────────────────────────────────────
-    # SEND ONE EMAIL PER AFFECTED PLATFORM
+    # EMAIL PER PLATFORM
     # ─────────────────────────────────────────
-    # Find all platforms that have new issues
     affected_platforms = set()
     for v in new_s1.values():   affected_platforms.add(v["platform"])
     for v in new_disc.values(): affected_platforms.add(v["platform"])
@@ -612,31 +602,30 @@ def run():
     emails_sent = {}
 
     for platform in sorted(affected_platforms):
-        spoc_email = get_platform_spoc(cfg, platform)
+        to_emails, cc_list = get_platform_emails(cfg, platform)
 
-        if not spoc_email:
-            print(f"WARNING: No SPOC email set for {platform}. Skipping email.")
+        if not to_emails:
+            print(f"WARNING: No email set for {platform} and cc_all is empty. Skipping.")
             continue
 
         body    = build_platform_email(
             platform, new_s1, old_s1,
             new_disc, old_disc, run_time_str
         )
-        subject = f"⚠️ PUMA ECOM ALERT — {platform} | {run_time_str} IST"
+        subject = f"PUMA ECOM ALERT — {platform} | {run_time_str} IST"
 
-        send_email(spoc_email, cc_all, subject, body)
-        emails_sent[platform] = spoc_email
+        send_email(to_emails, cc_list, subject, body)
+        emails_sent[platform] = to_emails
 
-        # Save report per platform
         with open(f"surge_report_{platform}.txt", "w") as f:
             f.write(body)
 
     print(f"\nSummary:")
-    print(f"  New spike/down issues : {len(new_s1)}")
-    print(f"  New high discount     : {len(new_disc)}")
-    print(f"  Emails sent           : {len(emails_sent)}")
+    print(f"  New spike/down : {len(new_s1)}")
+    print(f"  New discounts  : {len(new_disc)}")
+    print(f"  Emails sent    : {len(emails_sent)}")
     for p, e in emails_sent.items():
-        print(f"    {p} → {e}")
+        print(f"    {p} → {', '.join(e)}")
 
     return True, emails_sent
 
