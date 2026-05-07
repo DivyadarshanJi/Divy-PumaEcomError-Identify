@@ -3,7 +3,9 @@ import json
 import pyodbc
 from datetime import date, datetime, timedelta, timezone
 
-# India Standard Time = UTC + 5:30
+# ─────────────────────────────────────────────
+# INDIA STANDARD TIME
+# ─────────────────────────────────────────────
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # ─────────────────────────────────────────────
@@ -16,7 +18,7 @@ DISCOUNT_MIN_PCT = 0.70
 DISCOUNT_MIN_ORD = 5
 MIN_WEEKS        = 3
 TOP_ARTICLES     = 5
-FLAGS_FILE       = "flagged_discounts.json"
+FLAGS_FILE       = "flagged_today.json"
 
 # ─────────────────────────────────────────────
 # CHANNEL → PLATFORM MAP
@@ -47,40 +49,44 @@ CHANNEL_FILTER = "p.sales_channel IN ({})".format(
 )
 
 # ─────────────────────────────────────────────
-# DB CONNECTION
+# DB CONNECTION  (all from GitHub Secrets)
 # ─────────────────────────────────────────────
 def get_connection():
-    server   = os.environ["DB_HOST"]
-    database = os.environ["DB_NAME"]
-    username = os.environ["DB_USER"]
-    password = os.environ["DB_PASSWORD"]
     conn_str = (
         "DRIVER={ODBC Driver 18 for SQL Server};"
-        f"SERVER={server};"
-        f"DATABASE={database};"
-        f"UID={username};"
-        f"PWD={password};"
+        f"SERVER={os.environ['DB_HOST']};"
+        f"DATABASE={os.environ['DB_NAME']};"
+        f"UID={os.environ['DB_USER']};"
+        f"PWD={os.environ['DB_PASSWORD']};"
         "TrustServerCertificate=yes;"
         "Encrypt=yes;"
     )
     return pyodbc.connect(conn_str, timeout=30)
 
 # ─────────────────────────────────────────────
-# SLOT HELPERS
+# TIME HELPERS  (all IST)
 # ─────────────────────────────────────────────
+def now_ist():
+    return datetime.now(IST)
+
+def today_ist():
+    return now_ist().date()
+
 def get_check_slots():
-    now      = datetime.now(IST).replace(second=0, microsecond=0, tzinfo=None)
+    """
+    Run at X IST:
+      Primary = X-1hr   to X-30min
+      Safety  = X-1.5hr to X-1hr
+    Example: run at 5:00PM IST
+      Primary = 3:30PM - 4:00PM
+      Safety  = 3:00PM - 3:30PM
+    """
+    now      = now_ist().replace(second=0, microsecond=0, tzinfo=None)
     mins     = 0 if now.minute < 30 else 30
     run_time = now.replace(minute=mins)
-
-    primary_end   = run_time - timedelta(minutes=30)
-    primary_start = run_time - timedelta(minutes=60)
-    safety_end    = run_time - timedelta(minutes=60)
-    safety_start  = run_time - timedelta(minutes=90)
-
     return [
-        (primary_start, primary_end),
-        (safety_start,  safety_end),
+        (run_time - timedelta(minutes=60), run_time - timedelta(minutes=30)),
+        (run_time - timedelta(minutes=90), run_time - timedelta(minutes=60)),
     ]
 
 def slot_label(start, end):
@@ -93,91 +99,88 @@ def slot_label(start, end):
         return f"{h12}:{m:02d}{suffix}"
     return f"{fmt(start)}-{fmt(end)}"
 
-def get_baseline_dates(slot_start):
-    today   = datetime.now(IST).date()
+def time_label(dt):
+    """Format IST datetime as 9:30AM style."""
+    return dt.strftime("%I:%M%p").lstrip("0")
+
+def get_baseline_dates():
+    """Last 8 same weekdays as today (IST)."""
+    today   = today_ist()
     weekday = today.weekday()
-    dates   = []
-    weeks   = 0
+    dates, weeks = [], 0
     while len(dates) < 8:
-        weeks    += 1
-        candidate = today - timedelta(weeks=weeks)
-        if candidate.weekday() == weekday:
-            dates.append(candidate.strftime("%Y-%m-%d"))
+        weeks += 1
+        c = today - timedelta(weeks=weeks)
+        if c.weekday() == weekday:
+            dates.append(c.strftime("%Y-%m-%d"))
     return dates
 
 # ─────────────────────────────────────────────
 # SMART BASELINE
+# Drop highest + lowest, average remaining 6
 # ─────────────────────────────────────────────
 def smart_baseline(vals):
     non_zero = sum(1 for v in vals if v > 0)
     if non_zero < MIN_WEEKS:
         return 0.0, non_zero
-    if len(vals) < 3:
-        return sum(vals) / len(vals), non_zero
     trimmed = sorted(vals)[1:-1]
-    avg     = sum(trimmed) / len(trimmed) if trimmed else 0.0
-    return avg, non_zero
+    return (sum(trimmed) / len(trimmed) if trimmed else 0.0), non_zero
 
 # ─────────────────────────────────────────────
-# FLAGS FILE — load / save / update
+# FLAGS FILE
+# Stores all flagged issues for today (IST)
+# Resets automatically at midnight IST
+# Structure:
+# {
+#   "date": "2026-05-07",
+#   "platform_slots": {
+#     "Myntra|||3:30PM-4:00PM": {
+#       "issue", "orders", "baseline", "ratio",
+#       "first_flagged", "articles"
+#     }
+#   },
+#   "articles": {
+#     "Myntra|||12345678": {
+#       "discount", "first_flagged", "first_orders",
+#       "current_orders"
+#     }
+#   }
+# }
 # ─────────────────────────────────────────────
 def load_flags():
-    """
-    Load flagged_discounts.json.
-    Returns dict: {date, articles: {(platform,article): {discount, first_flagged, first_orders}}}
-    Resets if date has changed.
-    """
-    today_str = datetime.now(IST).strftime("%Y-%m-%d")
+    today_str = today_ist().strftime("%Y-%m-%d")
+    empty = {"date": today_str, "platform_slots": {}, "articles": {}}
     if not os.path.exists(FLAGS_FILE):
-        return {"date": today_str, "articles": {}}
-
+        return empty
     with open(FLAGS_FILE, "r") as f:
         data = json.load(f)
-
-    # Reset if new day
     if data.get("date") != today_str:
-        return {"date": today_str, "articles": {}}
-
+        return empty
     return data
 
 def save_flags(flags):
-    # Convert tuple keys to string for JSON
-    serializable = {
-        "date": flags["date"],
-        "articles": {
-            f"{k[0]}|||{k[1]}": v
-            for k, v in flags["articles"].items()
-        }
-    }
     with open(FLAGS_FILE, "w") as f:
-        json.dump(serializable, f, indent=2)
-
-def deserialize_flags(flags):
-    """Convert string keys back to tuples after loading."""
-    if not flags["articles"]:
-        return flags
-    deserialized = {}
-    for k, v in flags["articles"].items():
-        if "|||" in k:
-            parts = k.split("|||")
-            deserialized[(parts[0], parts[1])] = v
-        else:
-            deserialized[k] = v
-    flags["articles"] = deserialized
-    return flags
+        json.dump(flags, f, indent=2)
 
 # ─────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────
 def run():
-    now_ist   = datetime.now(IST)
-    today_str = now_ist.strftime("%Y-%m-%d")
-    time_now  = now_ist.strftime("%I:%M%p").lstrip("0")
-    slots     = get_check_slots()
+    now        = now_ist()
+    today_str  = now.strftime("%Y-%m-%d")
+    time_now   = time_label(now)
+    slots      = get_check_slots()
+    base_dates = get_baseline_dates()
+    base_in    = ",".join(f"'{d}'" for d in base_dates)
+    week_case  = (
+        "CASE CAST(p.channel_order_time AS DATE) " +
+        " ".join(f"WHEN '{d}' THEN {i+1}" for i, d in enumerate(base_dates)) +
+        " END"
+    )
 
-    print(f"Surge Watchdog running at {now_ist.strftime('%d-%b-%Y %H:%M')} IST")
+    print(f"Surge Watchdog running at {now.strftime('%d-%b-%Y %H:%M')} IST")
     for s, e in slots:
-        print(f"  Checking: {slot_label(s, e)}")
+        print(f"  Checking slot: {slot_label(s, e)}")
 
     conn = get_connection()
     cur  = conn.cursor()
@@ -190,21 +193,14 @@ def run():
     )
 
     # ─────────────────────────────────────────
-    # SECTION 1 — SPIKE / DOWN (per slot)
+    # SECTION 1 — SPIKE / DOWN per slot
     # ─────────────────────────────────────────
-    plat_slot_data = {}
+    current_s1 = {}   # (platform, slot_label) → row dict
 
     for slot_start, slot_end in slots:
-        label      = slot_label(slot_start, slot_end)
-        time_s     = slot_start.strftime("%H:%M:%S")
-        time_e     = slot_end.strftime("%H:%M:%S")
-        base_dates = get_baseline_dates(slot_start)
-        base_in    = ",".join(f"'{d}'" for d in base_dates)
-        week_case  = (
-            "CASE CAST(p.channel_order_time AS DATE) " +
-            " ".join(f"WHEN '{d}' THEN {i+1}" for i, d in enumerate(base_dates)) +
-            " END"
-        )
+        label  = slot_label(slot_start, slot_end)
+        time_s = slot_start.strftime("%H:%M:%S")
+        time_e = slot_end.strftime("%H:%M:%S")
 
         # Today orders per channel
         cur.execute(f"""
@@ -235,13 +231,11 @@ def run():
         for row in cur.fetchall():
             ch = row[0]
             wk = int(row[1]) - 1 if row[1] is not None else None
-            if wk is None:
-                continue
-            if ch not in base_by_ch:
-                base_by_ch[ch] = [0.0] * 8
+            if wk is None: continue
+            if ch not in base_by_ch: base_by_ch[ch] = [0.0] * 8
             base_by_ch[ch][wk] = float(row[2])
 
-        # Article orders + discount for spike
+        # Article orders + discount for this slot
         cur.execute(f"""
             SELECT p.sales_channel,
                    TRY_CAST(LTRIM(REPLACE(UPPER(p.Style),'IN','')) AS BIGINT) AS article,
@@ -268,65 +262,52 @@ def run():
             mrp  = float(row[3]) if row[3] else 0.0
             fwd  = float(row[4]) if row[4] else 0.0
             disc = (1.0 - fwd / mrp) if mrp > 0 else 0.0
-            if art is None:
-                continue
+            if art is None: continue
             pname = CHANNEL_MAP.get(ch, ch)
-            if pname not in art_by_plat:
-                art_by_plat[pname] = []
+            if pname not in art_by_plat: art_by_plat[pname] = []
             art_by_plat[pname].append({"article": art, "orders": ords, "discount": disc})
 
         # Aggregate channels → platforms
-        plat_today = {}
-        plat_base  = {}
+        plat_today, plat_base = {}, {}
         for ch, pname in CHANNEL_MAP.items():
-            tod = today_by_ch.get(ch, 0.0)
-            plat_today[pname] = plat_today.get(pname, 0.0) + tod
+            plat_today[pname] = plat_today.get(pname, 0.0) + today_by_ch.get(ch, 0.0)
             b = base_by_ch.get(ch, [0.0] * 8)
-            if pname not in plat_base:
-                plat_base[pname] = [0.0] * 8
-            for i in range(8):
-                plat_base[pname][i] += b[i]
+            if pname not in plat_base: plat_base[pname] = [0.0] * 8
+            for i in range(8): plat_base[pname][i] += b[i]
 
         # Spike / Down check
         for pname in set(CHANNEL_MAP.values()):
             tod       = plat_today.get(pname, 0.0)
             base, wks = smart_baseline(plat_base.get(pname, [0.0] * 8))
-
-            if wks < MIN_WEEKS and base < 5:
-                continue
-            if tod == 0 and base == 0:
-                continue
+            if wks < MIN_WEEKS and base < 5: continue
+            if tod == 0 and base == 0: continue
 
             issues = set()
             if base > 0 and tod >= SPIKE_MIN_ORDERS and (tod / base) >= SPIKE_RATIO:
                 issues.add("Spike")
             if base > 0 and tod > 0 and (tod / base) <= DOWN_RATIO:
                 issues.add("Down")
+            if not issues: continue
 
-            if not issues:
-                continue
-
-            ratio = (tod / base) if base > 0 else 0.0
-            key   = (pname, label)
-
+            ratio    = tod / base if base > 0 else 0.0
             top_arts = []
             if "Spike" in issues:
-                arts      = art_by_plat.get(pname, [])
-                top_arts  = sorted(arts, key=lambda x: -x["orders"])[:TOP_ARTICLES]
+                top_arts = sorted(
+                    art_by_plat.get(pname, []),
+                    key=lambda x: -x["orders"]
+                )[:TOP_ARTICLES]
 
-            if key not in plat_slot_data:
-                plat_slot_data[key] = {
-                    "platform": pname,
-                    "slot":     label,
-                    "issues":   set(),
-                    "orders":   tod,
-                    "baseline": base,
-                    "ratio":    ratio,
-                    "articles": top_arts
-                }
-            plat_slot_data[key]["issues"].update(issues)
-            if "Spike" in issues and not plat_slot_data[key]["articles"]:
-                plat_slot_data[key]["articles"] = top_arts
+            key = (pname, label)
+            current_s1[key] = {
+                "platform":     pname,
+                "slot":         label,
+                "issue":        ", ".join(sorted(issues)),
+                "orders":       tod,
+                "baseline":     base,
+                "ratio":        ratio,
+                "articles":     top_arts,
+                "first_flagged": time_now,
+            }
 
     # ─────────────────────────────────────────
     # SECTION 2 — HIGH DISCOUNT (full day)
@@ -346,9 +327,7 @@ def run():
         GROUP BY p.sales_channel,
                  TRY_CAST(LTRIM(REPLACE(UPPER(p.Style),'IN','')) AS BIGINT)
     """)
-
-    # All articles crossing threshold today
-    all_disc = {}  # (platform, article) → {orders, discount}
+    current_disc = {}
     for row in cur.fetchall():
         ch   = row[0]
         art  = str(int(row[1])) if row[1] is not None else None
@@ -356,145 +335,193 @@ def run():
         mrp  = float(row[3]) if row[3] else 0.0
         fwd  = float(row[4]) if row[4] else 0.0
         disc = (1.0 - fwd / mrp) if mrp > 0 else 0.0
-        if art is None or ords < DISCOUNT_MIN_ORD or disc < DISCOUNT_MIN_PCT:
-            continue
+        if art is None or ords < DISCOUNT_MIN_ORD or disc < DISCOUNT_MIN_PCT: continue
         pname = CHANNEL_MAP.get(ch, ch)
-        key   = (pname, art)
-        if key not in all_disc:
-            all_disc[key] = {"platform": pname, "article": art,
-                             "orders": 0.0, "discount": 0.0}
-        all_disc[key]["orders"]   += ords
-        all_disc[key]["discount"]  = max(all_disc[key]["discount"], disc)
+        key   = f"{pname}|||{art}"
+        if key not in current_disc:
+            current_disc[key] = {"platform": pname, "article": art, "orders": 0.0, "discount": 0.0}
+        current_disc[key]["orders"]   += ords
+        current_disc[key]["discount"]  = max(current_disc[key]["discount"], disc)
 
     conn.close()
 
-    # ── Load flags file ──
-    flags = deserialize_flags(load_flags())
-    already_flagged = flags["articles"]  # (platform, article) → {discount, first_flagged, first_orders}
+    # ─────────────────────────────────────────
+    # COMPARE WITH FLAGS FILE
+    # ─────────────────────────────────────────
+    flags = load_flags()
+    past_s1   = flags.get("platform_slots", {})
+    past_disc = flags.get("articles", {})
 
-    # ── Split into new vs past ──
-    new_flags  = {}
-    past_flags = {}
-
-    for key, data in all_disc.items():
-        if key in already_flagged:
-            # Past flag — update current orders
-            past_entry = dict(already_flagged[key])
-            past_entry["current_orders"] = data["orders"]
-            past_entry["discount"]       = data["discount"]
-            past_flags[key] = past_entry
+    # Section 1: split new vs past
+    new_s1  = {}
+    old_s1  = {}
+    for key_tuple, row in current_s1.items():
+        str_key = f"{key_tuple[0]}|||{key_tuple[1]}"
+        if str_key in past_s1:
+            # Already flagged — update orders for reference
+            entry = dict(past_s1[str_key])
+            entry["orders"] = row["orders"]
+            entry["articles"] = row["articles"]
+            old_s1[str_key] = entry
         else:
-            # New flag
-            new_flags[key] = {
-                "platform":     data["platform"],
-                "article":      data["article"],
-                "orders":       data["orders"],
-                "discount":     data["discount"],
+            new_s1[str_key] = row
+
+    # Section 2: split new vs past
+    new_disc  = {}
+    old_disc  = {}
+    for key, data in current_disc.items():
+        if key in past_disc:
+            entry = dict(past_disc[key])
+            entry["current_orders"] = data["orders"]
+            entry["discount"]       = data["discount"]
+            old_disc[key] = entry
+        else:
+            new_disc[key] = {
+                "platform":      data["platform"],
+                "article":       data["article"],
+                "orders":        data["orders"],
+                "discount":      data["discount"],
                 "first_flagged": time_now,
-                "first_orders":  data["orders"]
+                "first_orders":  data["orders"],
             }
 
-    # ── Decide whether to send email ──
-    s1_rows     = list(plat_slot_data.values())
-    has_new_disc = len(new_flags) > 0
-    should_send  = bool(s1_rows) or has_new_disc
+    # ─────────────────────────────────────────
+    # DECIDE WHETHER TO SEND
+    # ─────────────────────────────────────────
+    has_new = bool(new_s1) or bool(new_disc)
 
-    if not should_send:
-        print("No new issues found. No email sent.")
-        # Still save updated past flags with current orders
-        if past_flags:
-            for key, v in past_flags.items():
-                already_flagged[key]["current_orders"] = v["current_orders"]
-            save_flags(flags)
+    if not has_new:
+        print("No new issues. No email sent.")
+        # Update current orders in past flags silently
+        for k, v in old_s1.items():
+            if k in past_s1:
+                past_s1[k]["orders"]   = v["orders"]
+                past_s1[k]["articles"] = v["articles"]
+        for k, v in old_disc.items():
+            if k in past_disc:
+                past_disc[k]["current_orders"] = v["current_orders"]
+        save_flags(flags)
         return False, ""
 
-    # ── Update flags file ──
-    for key, v in new_flags.items():
-        already_flagged[key] = {
+    # ── Save new flags ──
+    for k, v in new_s1.items():
+        past_s1[k] = {
+            "issue":         v["issue"],
+            "orders":        v["orders"],
+            "baseline":      v["baseline"],
+            "ratio":         v["ratio"],
+            "first_flagged": v["first_flagged"],
+            "articles":      v["articles"],
+        }
+    for k, v in old_s1.items():
+        past_s1[k]["orders"]   = v["orders"]
+        past_s1[k]["articles"] = v["articles"]
+
+    for k, v in new_disc.items():
+        past_disc[k] = {
+            "platform":      v["platform"],
+            "article":       v["article"],
             "discount":      v["discount"],
             "first_flagged": v["first_flagged"],
-            "first_orders":  v["first_orders"]
+            "first_orders":  v["first_orders"],
         }
-    for key, v in past_flags.items():
-        already_flagged[key]["current_orders"] = v["current_orders"]
+    for k, v in old_disc.items():
+        past_disc[k]["current_orders"] = v["current_orders"]
+        past_disc[k]["discount"]       = v["discount"]
+
+    flags["platform_slots"] = past_s1
+    flags["articles"]       = past_disc
     save_flags(flags)
 
     # ─────────────────────────────────────────
     # BUILD REPORT
     # ─────────────────────────────────────────
-    s1_rows.sort(key=lambda r: (r["platform"], r["slot"]))
-    new_list  = sorted(new_flags.values(),  key=lambda r: (r["platform"], -r["orders"]))
-    past_list = sorted(past_flags.values(), key=lambda r: (r["platform"], -r.get("current_orders", 0)))
+    def art_str(articles):
+        if not articles: return "-"
+        parts = []
+        for a in articles:
+            d = f"{a['discount']*100:.0f}%"
+            parts.append(f"{a['article']} ({int(a['orders'])} orders, {d} disc)")
+        return",  ".join(parts)
 
-    run_time_str = now_ist.strftime("%d-%b-%Y %H:%M")
+    def s1_row_line(r, w):
+        return (
+            f"{r['platform']:<{w[0]}} {r['slot']:<{w[1]}} "
+            f"{r['issue']:<{w[2]}} {int(r['orders']):>{w[3]},} "
+            f"{int(r['baseline']):>{w[4]},} {r['ratio']:>{w[5]}.2f}x  "
+            f"{art_str(r['articles'])}"
+        )
+
+    W   = [13, 18, 7, 7, 9, 5]
+    HDR = (f"{'Platform':<{W[0]}} {'Time Slot':<{W[1]}} {'Issue':<{W[2]}} "
+           f"{'Orders':>{W[3]}} {'Baseline':>{W[4]}} {'Ratio':>{W[5]+1}}  "
+           f"Top Articles (Orders, Discount%)")
+    SEP = "-" * 95
+
     lines = []
+    lines.append("=" * 95)
+    lines.append(f"PUMA ECOM ALERT  |  {now.strftime('%d-%b-%Y %H:%M')} IST")
+    lines.append("=" * 95)
 
     # ── Section 1 ──
-    if s1_rows:
-        lines.append("=" * 95)
-        lines.append(f"PUMA ECOM ALERT  |  {run_time_str} IST")
-        lines.append("=" * 95)
+    if new_s1 or old_s1:
         lines.append("")
-        lines.append("SECTION 1 — ORDER SPIKE / DOWN  (last 2 slots)")
-        lines.append("-" * 95)
-        lines.append(
-            f"{'Platform':<13} {'Time Slot':<18} {'Issue':<7} "
-            f"{'Orders':>7} {'Baseline':>9} {'Ratio':>6}  "
-            f"Top Articles (Orders, Discount%)"
-        )
-        lines.append("-" * 95)
-        for r in s1_rows:
-            issue_str = ", ".join(sorted(r["issues"]))
-            ratio_str = f"{r['ratio']:.2f}x"
-            if r["articles"]:
-                art_parts = []
-                for a in r["articles"]:
-                    disc_str = f"{a['discount']*100:.0f}%"
-                    art_parts.append(f"{a['article']} ({int(a['orders'])} orders, {disc_str} disc)")
-                art_str = ",  ".join(art_parts)
-            else:
-                art_str = "-"
-            lines.append(
-                f"{r['platform']:<13} {r['slot']:<18} {issue_str:<7} "
-                f"{int(r['orders']):>7,} {int(r['baseline']):>9,} {ratio_str:>6}  "
-                f"{art_str}"
-            )
+        lines.append("SECTION 1 — ORDER SPIKE / DOWN")
         lines.append("")
+
+        if new_s1:
+            lines.append("  NEW ISSUES")
+            lines.append("  " + SEP)
+            lines.append("  " + HDR)
+            lines.append("  " + SEP)
+            for r in sorted(new_s1.values(), key=lambda x: (x["platform"], x["slot"])):
+                lines.append("  " + s1_row_line(r, W))
+            lines.append("")
+
+        if old_s1:
+            lines.append("  PAST ISSUES  (flagged earlier today)")
+            lines.append("  " + SEP)
+            lines.append("  " + HDR)
+            lines.append("  " + SEP)
+            for r in sorted(old_s1.values(), key=lambda x: (x["platform"], x["slot"])):
+                lines.append("  " + s1_row_line(r, W))
+            lines.append("")
 
     # ── Section 2 ──
-    if new_list or past_list:
+    if new_disc or old_disc:
         lines.append("=" * 70)
-        lines.append("SECTION 2 — HIGH DISCOUNT ARTICLES  (>= 70% discount, >= 5 orders)")
+        lines.append("SECTION 2 — HIGH DISCOUNT ARTICLES  (>= 70% discount, >= 5 orders today)")
         lines.append("")
 
-        if new_list:
+        disc_hdr = (f"  {'Platform':<13} {'Article':<13} "
+                    f"{'Orders':>10} {'Discount%':>10}  {'First Flagged'}")
+        disc_sep = "  " + "-" * 65
+
+        if new_disc:
             lines.append("  NEW FLAGS")
-            lines.append("  " + "-" * 65)
-            lines.append(
-                f"  {'Platform':<13} {'Article':<13} "
-                f"{'Orders':>8} {'Discount%':>10}  {'First Flagged'}"
-            )
-            lines.append("  " + "-" * 65)
-            for r in new_list:
+            lines.append(disc_sep)
+            lines.append(disc_hdr)
+            lines.append(disc_sep)
+            for r in sorted(new_disc.values(), key=lambda x: (x["platform"], -x["orders"])):
                 lines.append(
                     f"  {r['platform']:<13} {r['article']:<13} "
-                    f"{int(r['orders']):>8,} {r['discount']*100:>9.1f}%  "
+                    f"{int(r['orders']):>10,} {r['discount']*100:>9.1f}%  "
                     f"{r['first_flagged']}"
                 )
             lines.append("")
 
-        if past_list:
-            lines.append("  PAST FLAGS  (flagged earlier today)")
-            lines.append("  " + "-" * 65)
+        if old_disc:
+            lines.append("  PAST FLAGS  (flagged earlier today — current orders shown)")
+            lines.append(disc_sep)
             lines.append(
                 f"  {'Platform':<13} {'Article':<13} "
                 f"{'Curr Orders':>11} {'Discount%':>10}  {'First Flagged'}"
             )
-            lines.append("  " + "-" * 65)
-            for r in past_list:
+            lines.append(disc_sep)
+            for r in sorted(old_disc.values(), key=lambda x: (x["platform"], -x.get("current_orders", 0))):
                 lines.append(
                     f"  {r['platform']:<13} {r['article']:<13} "
-                    f"{int(r.get('current_orders', r.get('first_orders',0))):>11,} "
+                    f"{int(r.get('current_orders', r.get('first_orders', 0))):>11,} "
                     f"{r['discount']*100:>9.1f}%  "
                     f"{r['first_flagged']}"
                 )
@@ -507,8 +534,7 @@ def run():
     with open("surge_report.txt", "w") as f:
         f.write(report)
 
-    total = len(s1_rows) + len(new_list)
-    print(f"\n{total} new issue(s) found.")
+    print(f"\nNew issues: {len(new_s1)} spike/down  |  {len(new_disc)} high discount")
     return True, report
 
 # ─────────────────────────────────────────────
