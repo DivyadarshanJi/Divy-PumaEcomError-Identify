@@ -1,0 +1,45 @@
+name: Surge Monitor
+
+on:
+  schedule:
+    - cron: '0,30 * * * *'   # runs every 30 minutes, 24/7
+  workflow_dispatch:           # allows manual run from GitHub UI
+
+jobs:
+  surge-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install ODBC Driver for SQL Server
+        run: |
+          curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
+          curl https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Surge Watchdog
+        env:
+          DB_HOST:     ${{ secrets.DB_HOST }}
+          DB_NAME:     ${{ secrets.DB_NAME }}
+          DB_USER:     ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: python surge_watchdog.py
+
+      - name: Upload surge report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surge-report-${{ github.run_number }}
+          path: surge_report.txt
+          retention-days: 7
