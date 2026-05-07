@@ -1,6 +1,7 @@
 import os
 import json
 import pyodbc
+import urllib.request
 from datetime import date, datetime, timedelta, timezone
 
 # ─────────────────────────────────────────────
@@ -21,8 +22,7 @@ DEFAULT_THRESHOLDS = {
 }
 
 TOP_ARTICLES = 5
-FLAGS_FILE   = "flagged_today.json"
-CONFIG_FILE  = "config.json"
+CONFIG_URL   = "https://raw.githubusercontent.com/DivyadarshanJi/Divy-PumaEcom-Config/main/config.json"
 
 # ─────────────────────────────────────────────
 # CHANNEL → PLATFORM MAP
@@ -58,15 +58,21 @@ CHANNEL_FILTER = "p.sales_channel IN ({})".format(
 # Falls back to defaults if missing
 # ─────────────────────────────────────────────
 def load_config():
-    if not os.path.exists(CONFIG_FILE):
-        print("WARNING: config.json not found. Using defaults.")
+    """
+    Fetches config.json from public GitHub repo.
+    Falls back to defaults if fetch fails.
+    """
+    try:
+        with urllib.request.urlopen(CONFIG_URL, timeout=10) as resp:
+            cfg = json.loads(resp.read().decode("utf-8"))
+        print(f"Config loaded from: {CONFIG_URL}")
+    except Exception as e:
+        print(f"WARNING: Could not fetch config.json ({e}). Using defaults.")
         return {
             "global":    DEFAULT_THRESHOLDS.copy(),
             "platforms": {},
             "cc_all":    ""
         }
-    with open(CONFIG_FILE, "r") as f:
-        cfg = json.load(f)
 
     # Ensure all global threshold keys exist
     for k, v in DEFAULT_THRESHOLDS.items():
