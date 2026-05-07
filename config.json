@@ -39,7 +39,7 @@
       "spike_min_orders":    100,
       "down_ratio":          0.5,
       "discount_min_pct":    70,
-      "discount_min_orders": 5
+      "discount_min_orders": 10
     },
     "Myntra": {
       "use_global": true,
