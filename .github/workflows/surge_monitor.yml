@@ -2,7 +2,7 @@ name: Surge Monitor
 
 on:
   schedule:
-    - cron: '0,30 * * * *'   # runs every 30 minutes, 24/7
+    - cron: '*/30 * * * *'   # runs every 30 minutes, 24/7
   workflow_dispatch:           # allows manual run from GitHub UI
 
 jobs:
