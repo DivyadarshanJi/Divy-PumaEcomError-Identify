@@ -1,4 +1,5 @@
 import os
+import json
 import pyodbc
 from datetime import date, datetime, timedelta, timezone
 
@@ -8,12 +9,14 @@ IST = timezone(timedelta(hours=5, minutes=30))
 # ─────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────
-SPIKE_RATIO       = 1.5
-SPIKE_MIN_ORDERS  = 100
-DOWN_RATIO        = 0.5
-DISCOUNT_MIN_PCT  = 0.70
-DISCOUNT_MIN_ORD  = 5
-MIN_WEEKS         = 3
+SPIKE_RATIO      = 1.5
+SPIKE_MIN_ORDERS = 100
+DOWN_RATIO       = 0.5
+DISCOUNT_MIN_PCT = 0.70
+DISCOUNT_MIN_ORD = 5
+MIN_WEEKS        = 3
+TOP_ARTICLES     = 5
+FLAGS_FILE       = "flagged_discounts.json"
 
 # ─────────────────────────────────────────────
 # CHANNEL → PLATFORM MAP
@@ -47,10 +50,10 @@ CHANNEL_FILTER = "p.sales_channel IN ({})".format(
 # DB CONNECTION
 # ─────────────────────────────────────────────
 def get_connection():
-    server   = os.environ.get("DB_HOST",     "rpro.pumaindia.in")
-    database = os.environ.get("DB_NAME",     "PUMA_ECOM")
-    username = os.environ.get("DB_USER",     "Vinod.P")
-    password = os.environ.get("DB_PASSWORD", "")
+    server   = os.environ["DB_HOST"]
+    database = os.environ["DB_NAME"]
+    username = os.environ["DB_USER"]
+    password = os.environ["DB_PASSWORD"]
     conn_str = (
         "DRIVER={ODBC Driver 18 for SQL Server};"
         f"SERVER={server};"
@@ -66,16 +69,8 @@ def get_connection():
 # SLOT HELPERS
 # ─────────────────────────────────────────────
 def get_check_slots():
-    """
-    Run at X:
-      Primary slot = X-1hr   to X-30min
-      Safety slot  = X-1.5hr to X-1hr
-    Example: run at 10:30 AM
-      Primary = 9:30 AM - 10:00 AM
-      Safety  = 9:00 AM - 9:30 AM
-    """
-    now  = datetime.now(IST).replace(second=0, microsecond=0, tzinfo=None)
-    mins = 0 if now.minute < 30 else 30
+    now      = datetime.now(IST).replace(second=0, microsecond=0, tzinfo=None)
+    mins     = 0 if now.minute < 30 else 30
     run_time = now.replace(minute=mins)
 
     primary_end   = run_time - timedelta(minutes=30)
@@ -90,22 +85,21 @@ def get_check_slots():
 
 def slot_label(start, end):
     def fmt(dt):
-        h  = dt.hour
-        m  = dt.minute
+        h      = dt.hour
+        m      = dt.minute
         suffix = "AM" if h < 12 else "PM"
-        h12 = h if h <= 12 else h - 12
+        h12    = h if h <= 12 else h - 12
         if h12 == 0: h12 = 12
         return f"{h12}:{m:02d}{suffix}"
     return f"{fmt(start)}-{fmt(end)}"
 
 def get_baseline_dates(slot_start):
-    """Return last 8 dates with same weekday as today."""
     today   = datetime.now(IST).date()
     weekday = today.weekday()
     dates   = []
     weeks   = 0
     while len(dates) < 8:
-        weeks += 1
+        weeks    += 1
         candidate = today - timedelta(weeks=weeks)
         if candidate.weekday() == weekday:
             dates.append(candidate.strftime("%Y-%m-%d"))
@@ -113,7 +107,6 @@ def get_baseline_dates(slot_start):
 
 # ─────────────────────────────────────────────
 # SMART BASELINE
-# drop highest + lowest, average remaining 6
 # ─────────────────────────────────────────────
 def smart_baseline(vals):
     non_zero = sum(1 for v in vals if v > 0)
@@ -122,17 +115,67 @@ def smart_baseline(vals):
     if len(vals) < 3:
         return sum(vals) / len(vals), non_zero
     trimmed = sorted(vals)[1:-1]
-    avg = sum(trimmed) / len(trimmed) if trimmed else 0.0
+    avg     = sum(trimmed) / len(trimmed) if trimmed else 0.0
     return avg, non_zero
+
+# ─────────────────────────────────────────────
+# FLAGS FILE — load / save / update
+# ─────────────────────────────────────────────
+def load_flags():
+    """
+    Load flagged_discounts.json.
+    Returns dict: {date, articles: {(platform,article): {discount, first_flagged, first_orders}}}
+    Resets if date has changed.
+    """
+    today_str = datetime.now(IST).strftime("%Y-%m-%d")
+    if not os.path.exists(FLAGS_FILE):
+        return {"date": today_str, "articles": {}}
+
+    with open(FLAGS_FILE, "r") as f:
+        data = json.load(f)
+
+    # Reset if new day
+    if data.get("date") != today_str:
+        return {"date": today_str, "articles": {}}
+
+    return data
+
+def save_flags(flags):
+    # Convert tuple keys to string for JSON
+    serializable = {
+        "date": flags["date"],
+        "articles": {
+            f"{k[0]}|||{k[1]}": v
+            for k, v in flags["articles"].items()
+        }
+    }
+    with open(FLAGS_FILE, "w") as f:
+        json.dump(serializable, f, indent=2)
+
+def deserialize_flags(flags):
+    """Convert string keys back to tuples after loading."""
+    if not flags["articles"]:
+        return flags
+    deserialized = {}
+    for k, v in flags["articles"].items():
+        if "|||" in k:
+            parts = k.split("|||")
+            deserialized[(parts[0], parts[1])] = v
+        else:
+            deserialized[k] = v
+    flags["articles"] = deserialized
+    return flags
 
 # ─────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────
 def run():
-    today_str = datetime.now(IST).strftime("%Y-%m-%d")
+    now_ist   = datetime.now(IST)
+    today_str = now_ist.strftime("%Y-%m-%d")
+    time_now  = now_ist.strftime("%I:%M%p").lstrip("0")
     slots     = get_check_slots()
 
-    print(f"Surge Watchdog running at {datetime.now(IST).strftime('%d-%b-%Y %H:%M')} IST")
+    print(f"Surge Watchdog running at {now_ist.strftime('%d-%b-%Y %H:%M')} IST")
     for s, e in slots:
         print(f"  Checking: {slot_label(s, e)}")
 
@@ -146,28 +189,25 @@ def run():
         f"AND {CHANNEL_FILTER}"
     )
 
-    # Results collectors
-    # plat_slot_issues: (platform, slot_label) → set("Spike","Down")
-    # art_tracker:      (platform, article)    → dict
-    plat_slot_issues = {}
-    art_tracker      = {}
+    # ─────────────────────────────────────────
+    # SECTION 1 — SPIKE / DOWN (per slot)
+    # ─────────────────────────────────────────
+    plat_slot_data = {}
 
     for slot_start, slot_end in slots:
-        label  = slot_label(slot_start, slot_end)
-        time_s = slot_start.strftime("%H:%M:%S")
-        time_e = slot_end.strftime("%H:%M:%S")
-
+        label      = slot_label(slot_start, slot_end)
+        time_s     = slot_start.strftime("%H:%M:%S")
+        time_e     = slot_end.strftime("%H:%M:%S")
         base_dates = get_baseline_dates(slot_start)
         base_in    = ",".join(f"'{d}'" for d in base_dates)
-
-        week_case = (
+        week_case  = (
             "CASE CAST(p.channel_order_time AS DATE) " +
             " ".join(f"WHEN '{d}' THEN {i+1}" for i, d in enumerate(base_dates)) +
             " END"
         )
 
-        # ── Query 1: Today orders per channel ──
-        q_today = f"""
+        # Today orders per channel
+        cur.execute(f"""
             SELECT p.sales_channel,
                    SUM(p.order_qty - p.cancelled_qty) AS orders
             FROM PUMA_ECOM.dbo.PUMA_Discount_ALert p
@@ -176,10 +216,11 @@ def run():
               AND CAST(p.channel_order_time AS TIME) >= '{time_s}'
               AND CAST(p.channel_order_time AS TIME) <  '{time_e}'
             GROUP BY p.sales_channel
-        """
+        """)
+        today_by_ch = {row[0]: float(row[1]) for row in cur.fetchall()}
 
-        # ── Query 2: Baseline per channel per week ──
-        q_base = f"""
+        # Baseline per channel per week
+        cur.execute(f"""
             SELECT p.sales_channel,
                    {week_case} AS week_num,
                    SUM(p.order_qty - p.cancelled_qty) AS orders
@@ -189,10 +230,19 @@ def run():
               AND CAST(p.channel_order_time AS TIME) >= '{time_s}'
               AND CAST(p.channel_order_time AS TIME) <  '{time_e}'
             GROUP BY p.sales_channel, {week_case}
-        """
+        """)
+        base_by_ch = {}
+        for row in cur.fetchall():
+            ch = row[0]
+            wk = int(row[1]) - 1 if row[1] is not None else None
+            if wk is None:
+                continue
+            if ch not in base_by_ch:
+                base_by_ch[ch] = [0.0] * 8
+            base_by_ch[ch][wk] = float(row[2])
 
-        # ── Query 3: Article orders + discount today ──
-        q_art = f"""
+        # Article orders + discount for spike
+        cur.execute(f"""
             SELECT p.sales_channel,
                    TRY_CAST(LTRIM(REPLACE(UPPER(p.Style),'IN','')) AS BIGINT) AS article,
                    SUM(p.order_qty - p.cancelled_qty) AS orders,
@@ -208,37 +258,24 @@ def run():
               AND TRY_CAST(LTRIM(REPLACE(UPPER(p.Style),'IN','')) AS BIGINT) IS NOT NULL
             GROUP BY p.sales_channel,
                      TRY_CAST(LTRIM(REPLACE(UPPER(p.Style),'IN','')) AS BIGINT)
-        """
-
-        # Fetch today
-        cur.execute(q_today)
-        today_by_ch = {row[0]: float(row[1]) for row in cur.fetchall()}
-
-        # Fetch baseline
-        base_by_ch = {}
-        cur.execute(q_base)
+            ORDER BY SUM(p.order_qty - p.cancelled_qty) DESC
+        """)
+        art_by_plat = {}
         for row in cur.fetchall():
-            ch = row[0]
-            wk = int(row[1]) - 1 if row[1] is not None else None
-            if wk is None:
+            ch   = row[0]
+            art  = str(int(row[1])) if row[1] is not None else None
+            ords = float(row[2]) if row[2] else 0.0
+            mrp  = float(row[3]) if row[3] else 0.0
+            fwd  = float(row[4]) if row[4] else 0.0
+            disc = (1.0 - fwd / mrp) if mrp > 0 else 0.0
+            if art is None:
                 continue
-            if ch not in base_by_ch:
-                base_by_ch[ch] = [0.0] * 8
-            base_by_ch[ch][wk] = float(row[2])
+            pname = CHANNEL_MAP.get(ch, ch)
+            if pname not in art_by_plat:
+                art_by_plat[pname] = []
+            art_by_plat[pname].append({"article": art, "orders": ords, "discount": disc})
 
-        # Fetch articles
-        cur.execute(q_art)
-        art_rows = []
-        for row in cur.fetchall():
-            ch    = row[0]
-            art   = str(int(row[1])) if row[1] is not None else None
-            ords  = float(row[2]) if row[2] else 0.0
-            mrp   = float(row[3]) if row[3] else 0.0
-            fwd   = float(row[4]) if row[4] else 0.0
-            disc  = (1.0 - fwd / mrp) if mrp > 0 else 0.0
-            art_rows.append((ch, art, ords, disc))
-
-        # ── Aggregate channels → platforms ──
+        # Aggregate channels → platforms
         plat_today = {}
         plat_base  = {}
         for ch, pname in CHANNEL_MAP.items():
@@ -250,10 +287,10 @@ def run():
             for i in range(8):
                 plat_base[pname][i] += b[i]
 
-        # ── Spike / Down check ──
+        # Spike / Down check
         for pname in set(CHANNEL_MAP.values()):
-            tod            = plat_today.get(pname, 0.0)
-            base, wks      = smart_baseline(plat_base.get(pname, [0.0] * 8))
+            tod       = plat_today.get(pname, 0.0)
+            base, wks = smart_baseline(plat_base.get(pname, [0.0] * 8))
 
             if wks < MIN_WEEKS and base < 5:
                 continue
@@ -266,111 +303,212 @@ def run():
             if base > 0 and tod > 0 and (tod / base) <= DOWN_RATIO:
                 issues.add("Down")
 
-            if issues:
-                key = (pname, label)
-                if key not in plat_slot_issues:
-                    plat_slot_issues[key] = set()
-                plat_slot_issues[key].update(issues)
-
-        # ── High Discount check ──
-        for ch, art, ords, disc in art_rows:
-            if art is None or ords < DISCOUNT_MIN_ORD or disc < DISCOUNT_MIN_PCT:
+            if not issues:
                 continue
-            pname = CHANNEL_MAP.get(ch, ch)
-            akey  = (pname, art)
-            if akey not in art_tracker:
-                art_tracker[akey] = {"issues": set(), "slots": set(),
-                                     "orders": 0.0,   "discount": 0.0}
-            art_tracker[akey]["issues"].add("High Discount")
-            art_tracker[akey]["slots"].add(label)
-            art_tracker[akey]["orders"]   += ords
-            art_tracker[akey]["discount"]  = max(art_tracker[akey]["discount"], disc)
+
+            ratio = (tod / base) if base > 0 else 0.0
+            key   = (pname, label)
+
+            top_arts = []
+            if "Spike" in issues:
+                arts      = art_by_plat.get(pname, [])
+                top_arts  = sorted(arts, key=lambda x: -x["orders"])[:TOP_ARTICLES]
+
+            if key not in plat_slot_data:
+                plat_slot_data[key] = {
+                    "platform": pname,
+                    "slot":     label,
+                    "issues":   set(),
+                    "orders":   tod,
+                    "baseline": base,
+                    "ratio":    ratio,
+                    "articles": top_arts
+                }
+            plat_slot_data[key]["issues"].update(issues)
+            if "Spike" in issues and not plat_slot_data[key]["articles"]:
+                plat_slot_data[key]["articles"] = top_arts
+
+    # ─────────────────────────────────────────
+    # SECTION 2 — HIGH DISCOUNT (full day)
+    # ─────────────────────────────────────────
+    cur.execute(f"""
+        SELECT p.sales_channel,
+               TRY_CAST(LTRIM(REPLACE(UPPER(p.Style),'IN','')) AS BIGINT) AS article,
+               SUM(p.order_qty - p.cancelled_qty) AS orders,
+               SUM(p.order_mrp_amount) AS mrp_total,
+               SUM(CASE WHEN p.order_qty = 0 THEN 0
+                        ELSE p.order_amount * (p.order_qty - p.cancelled_qty) / p.order_qty
+                   END) AS fwd_realised
+        FROM PUMA_ECOM.dbo.PUMA_Discount_ALert p
+        WHERE {base_cond}
+          AND CAST(p.channel_order_time AS DATE) = '{today_str}'
+          AND TRY_CAST(LTRIM(REPLACE(UPPER(p.Style),'IN','')) AS BIGINT) IS NOT NULL
+        GROUP BY p.sales_channel,
+                 TRY_CAST(LTRIM(REPLACE(UPPER(p.Style),'IN','')) AS BIGINT)
+    """)
+
+    # All articles crossing threshold today
+    all_disc = {}  # (platform, article) → {orders, discount}
+    for row in cur.fetchall():
+        ch   = row[0]
+        art  = str(int(row[1])) if row[1] is not None else None
+        ords = float(row[2]) if row[2] else 0.0
+        mrp  = float(row[3]) if row[3] else 0.0
+        fwd  = float(row[4]) if row[4] else 0.0
+        disc = (1.0 - fwd / mrp) if mrp > 0 else 0.0
+        if art is None or ords < DISCOUNT_MIN_ORD or disc < DISCOUNT_MIN_PCT:
+            continue
+        pname = CHANNEL_MAP.get(ch, ch)
+        key   = (pname, art)
+        if key not in all_disc:
+            all_disc[key] = {"platform": pname, "article": art,
+                             "orders": 0.0, "discount": 0.0}
+        all_disc[key]["orders"]   += ords
+        all_disc[key]["discount"]  = max(all_disc[key]["discount"], disc)
 
     conn.close()
 
-    # ── Attach Spike to articles on spiking platforms ──
-    for (pname, art), adata in art_tracker.items():
-        for lbl in list(adata["slots"]):
-            if "Spike" in plat_slot_issues.get((pname, lbl), set()):
-                adata["issues"].add("Spike")
+    # ── Load flags file ──
+    flags = deserialize_flags(load_flags())
+    already_flagged = flags["articles"]  # (platform, article) → {discount, first_flagged, first_orders}
 
-    # ── Build final rows ──
-    final_rows = []
+    # ── Split into new vs past ──
+    new_flags  = {}
+    past_flags = {}
 
-    # DOWN rows (platform level, no article)
-    down_done = set()
-    for (pname, lbl), issues in plat_slot_issues.items():
-        if "Down" in issues:
-            key = (pname, lbl)
-            if key not in down_done:
-                final_rows.append({
-                    "platform": pname,
-                    "slot":     lbl,
-                    "issue":    "Down",
-                    "article":  "-"
-                })
-                down_done.add(key)
+    for key, data in all_disc.items():
+        if key in already_flagged:
+            # Past flag — update current orders
+            past_entry = dict(already_flagged[key])
+            past_entry["current_orders"] = data["orders"]
+            past_entry["discount"]       = data["discount"]
+            past_flags[key] = past_entry
+        else:
+            # New flag
+            new_flags[key] = {
+                "platform":     data["platform"],
+                "article":      data["article"],
+                "orders":       data["orders"],
+                "discount":     data["discount"],
+                "first_flagged": time_now,
+                "first_orders":  data["orders"]
+            }
 
-    # Article rows (Spike / High Discount / both)
-    for (pname, art), adata in art_tracker.items():
-        issue_str = ", ".join(sorted(adata["issues"]))
-        slot_str  = " & ".join(sorted(adata["slots"]))
-        final_rows.append({
-            "platform": pname,
-            "slot":     slot_str,
-            "issue":    issue_str,
-            "article":  art
-        })
+    # ── Decide whether to send email ──
+    s1_rows     = list(plat_slot_data.values())
+    has_new_disc = len(new_flags) > 0
+    should_send  = bool(s1_rows) or has_new_disc
 
-    # Spike rows where no article crossed threshold
-    spike_covered = {
-        (r["platform"], s)
-        for r in final_rows
-        for s in r["slot"].split(" & ")
-        if r["article"] != "-"
-    }
-    for (pname, lbl), issues in plat_slot_issues.items():
-        if "Spike" in issues and (pname, lbl) not in spike_covered:
-            final_rows.append({
-                "platform": pname,
-                "slot":     lbl,
-                "issue":    "Spike",
-                "article":  "-"
-            })
-
-    if not final_rows:
-        print("No issues found. No email needed.")
+    if not should_send:
+        print("No new issues found. No email sent.")
+        # Still save updated past flags with current orders
+        if past_flags:
+            for key, v in past_flags.items():
+                already_flagged[key]["current_orders"] = v["current_orders"]
+            save_flags(flags)
         return False, ""
 
-    # Sort
-    final_rows.sort(key=lambda r: (r["platform"], r["slot"]))
+    # ── Update flags file ──
+    for key, v in new_flags.items():
+        already_flagged[key] = {
+            "discount":      v["discount"],
+            "first_flagged": v["first_flagged"],
+            "first_orders":  v["first_orders"]
+        }
+    for key, v in past_flags.items():
+        already_flagged[key]["current_orders"] = v["current_orders"]
+    save_flags(flags)
 
-    # ── Format table ──
-    w = [13, 22, 26, 14]
-    sep = "-" * (sum(w) + 3)
-    hdr = (f"{'Platform':<{w[0]}} {'Time Slot':<{w[1]}} "
-           f"{'Issue':<{w[2]}} {'Article':<{w[3]}}")
+    # ─────────────────────────────────────────
+    # BUILD REPORT
+    # ─────────────────────────────────────────
+    s1_rows.sort(key=lambda r: (r["platform"], r["slot"]))
+    new_list  = sorted(new_flags.values(),  key=lambda r: (r["platform"], -r["orders"]))
+    past_list = sorted(past_flags.values(), key=lambda r: (r["platform"], -r.get("current_orders", 0)))
 
+    run_time_str = now_ist.strftime("%d-%b-%Y %H:%M")
     lines = []
-    lines.append("=" * (sum(w) + 3))
-    lines.append(f"PUMA ECOM ALERT  |  {datetime.now().strftime('%d-%b-%Y %H:%M')}")
-    lines.append("=" * (sum(w) + 3))
-    lines.append(hdr)
-    lines.append(sep)
-    for r in final_rows:
-        lines.append(
-            f"{r['platform']:<{w[0]}} {r['slot']:<{w[1]}} "
-            f"{r['issue']:<{w[2]}} {r['article']:<{w[3]}}"
-        )
-    lines.append("=" * (sum(w) + 3))
 
+    # ── Section 1 ──
+    if s1_rows:
+        lines.append("=" * 95)
+        lines.append(f"PUMA ECOM ALERT  |  {run_time_str} IST")
+        lines.append("=" * 95)
+        lines.append("")
+        lines.append("SECTION 1 — ORDER SPIKE / DOWN  (last 2 slots)")
+        lines.append("-" * 95)
+        lines.append(
+            f"{'Platform':<13} {'Time Slot':<18} {'Issue':<7} "
+            f"{'Orders':>7} {'Baseline':>9} {'Ratio':>6}  "
+            f"Top Articles (Orders, Discount%)"
+        )
+        lines.append("-" * 95)
+        for r in s1_rows:
+            issue_str = ", ".join(sorted(r["issues"]))
+            ratio_str = f"{r['ratio']:.2f}x"
+            if r["articles"]:
+                art_parts = []
+                for a in r["articles"]:
+                    disc_str = f"{a['discount']*100:.0f}%"
+                    art_parts.append(f"{a['article']} ({int(a['orders'])} orders, {disc_str} disc)")
+                art_str = ",  ".join(art_parts)
+            else:
+                art_str = "-"
+            lines.append(
+                f"{r['platform']:<13} {r['slot']:<18} {issue_str:<7} "
+                f"{int(r['orders']):>7,} {int(r['baseline']):>9,} {ratio_str:>6}  "
+                f"{art_str}"
+            )
+        lines.append("")
+
+    # ── Section 2 ──
+    if new_list or past_list:
+        lines.append("=" * 70)
+        lines.append("SECTION 2 — HIGH DISCOUNT ARTICLES  (>= 70% discount, >= 5 orders)")
+        lines.append("")
+
+        if new_list:
+            lines.append("  NEW FLAGS")
+            lines.append("  " + "-" * 65)
+            lines.append(
+                f"  {'Platform':<13} {'Article':<13} "
+                f"{'Orders':>8} {'Discount%':>10}  {'First Flagged'}"
+            )
+            lines.append("  " + "-" * 65)
+            for r in new_list:
+                lines.append(
+                    f"  {r['platform']:<13} {r['article']:<13} "
+                    f"{int(r['orders']):>8,} {r['discount']*100:>9.1f}%  "
+                    f"{r['first_flagged']}"
+                )
+            lines.append("")
+
+        if past_list:
+            lines.append("  PAST FLAGS  (flagged earlier today)")
+            lines.append("  " + "-" * 65)
+            lines.append(
+                f"  {'Platform':<13} {'Article':<13} "
+                f"{'Curr Orders':>11} {'Discount%':>10}  {'First Flagged'}"
+            )
+            lines.append("  " + "-" * 65)
+            for r in past_list:
+                lines.append(
+                    f"  {r['platform']:<13} {r['article']:<13} "
+                    f"{int(r.get('current_orders', r.get('first_orders',0))):>11,} "
+                    f"{r['discount']*100:>9.1f}%  "
+                    f"{r['first_flagged']}"
+                )
+            lines.append("")
+
+    lines.append("=" * 95)
     report = "\n".join(lines)
     print(report)
 
     with open("surge_report.txt", "w") as f:
         f.write(report)
 
-    print(f"\n{len(final_rows)} issue(s) found.")
+    total = len(s1_rows) + len(new_list)
+    print(f"\n{total} new issue(s) found.")
     return True, report
 
 # ─────────────────────────────────────────────
