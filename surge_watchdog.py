@@ -22,6 +22,7 @@ DEFAULT_THRESHOLDS = {
 }
 
 TOP_ARTICLES = 5
+FLAGS_FILE   = "flagged_today.json"
 CONFIG_URL   = "https://raw.githubusercontent.com/DivyadarshanJi/Divy-PumaEcom-Config/main/config.json"
 
 # ─────────────────────────────────────────────
