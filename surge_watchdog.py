@@ -645,7 +645,7 @@ def print_daily_summary():
     cfg = load_config()
 
     # Build all 30-min slots from 00:00 to now
-  slots = []
+    slots = []
     cursor = now.replace(hour=0, minute=0, second=0, microsecond=0)
     summary_end = now.replace(second=0, microsecond=0)
     summary_end = summary_end.replace(minute=0 if summary_end.minute < 30 else 30)
