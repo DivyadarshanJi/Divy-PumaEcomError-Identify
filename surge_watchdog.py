@@ -336,7 +336,7 @@ def run():
     )
 
     # ── Load config ──
-    cfg      = load_config()
+    cfg       = load_config()
     cc_emails = get_cc_emails(cfg)
 
     print(f"Surge Watchdog running at {run_time_str} IST")
@@ -671,67 +671,71 @@ def print_daily_summary():
 
     platforms = sorted(set(CHANNEL_MAP.values()))
 
-    # Collect results: {platform: {slot_label: {orders, baseline, ratio}}}
+    # Collect results: {platform: {slot_label: {orders, baseline, ratio, wks}}}
     results = {p: {} for p in platforms}
 
+    # ── Single query: today all slots ──
+    cur.execute(f"""
+        SELECT p.sales_channel,
+               DATEPART(HOUR, p.channel_order_time) * 60 +
+               (DATEPART(MINUTE, p.channel_order_time) / 30) * 30 AS slot_min,
+               SUM(p.order_qty - p.cancelled_qty) AS orders
+        FROM PUMA_ECOM.dbo.PUMA_Discount_ALert p
+        WHERE {base_cond}
+          AND CAST(p.channel_order_time AS DATE) = '{today_str}'
+        GROUP BY p.sales_channel,
+                 DATEPART(HOUR, p.channel_order_time) * 60 +
+                 (DATEPART(MINUTE, p.channel_order_time) / 30) * 30
+    """)
+    today_raw = {}  # {(channel, slot_min): orders}
+    for row in cur.fetchall():
+        today_raw[(row[0], int(row[1]))] = float(row[2])
+
+    # ── Single query: baseline all slots ──
+    cur.execute(f"""
+        SELECT p.sales_channel,
+               {week_case} AS week_num,
+               DATEPART(HOUR, p.channel_order_time) * 60 +
+               (DATEPART(MINUTE, p.channel_order_time) / 30) * 30 AS slot_min,
+               SUM(p.order_qty - p.cancelled_qty) AS orders
+        FROM PUMA_ECOM.dbo.PUMA_Discount_ALert p
+        WHERE {base_cond}
+          AND CAST(p.channel_order_time AS DATE) IN ({base_in})
+        GROUP BY p.sales_channel,
+                 {week_case},
+                 DATEPART(HOUR, p.channel_order_time) * 60 +
+                 (DATEPART(MINUTE, p.channel_order_time) / 30) * 30
+    """)
+    base_raw = {}  # {(channel, slot_min, week_idx): orders}
+    for row in cur.fetchall():
+        wk = int(row[1]) - 1 if row[1] is not None else None
+        if wk is None: continue
+        base_raw[(row[0], int(row[2]), wk)] = float(row[3])
+
+    conn.close()
+
+    # ── Slice in Python per slot ──
     for slot_start, slot_end in slots:
-        label  = slot_label(slot_start, slot_end)
-        time_s = slot_start.strftime("%H:%M:%S")
-        time_e = slot_end.strftime("%H:%M:%S")
+        label    = slot_label(slot_start, slot_end)
+        slot_min = slot_start.hour * 60 + slot_start.minute
 
-        # Today orders
-        cur.execute(f"""
-            SELECT p.sales_channel,
-                   SUM(p.order_qty - p.cancelled_qty) AS orders
-            FROM PUMA_ECOM.dbo.PUMA_Discount_ALert p
-            WHERE {base_cond}
-              AND CAST(p.channel_order_time AS DATE) = '{today_str}'
-              AND CAST(p.channel_order_time AS TIME) >= '{time_s}'
-              AND CAST(p.channel_order_time AS TIME) <  '{time_e}'
-            GROUP BY p.sales_channel
-        """)
-        today_by_ch = {row[0]: float(row[1]) for row in cur.fetchall()}
-
-        # Baseline
-        cur.execute(f"""
-            SELECT p.sales_channel,
-                   {week_case} AS week_num,
-                   SUM(p.order_qty - p.cancelled_qty) AS orders
-            FROM PUMA_ECOM.dbo.PUMA_Discount_ALert p
-            WHERE {base_cond}
-              AND CAST(p.channel_order_time AS DATE) IN ({base_in})
-              AND CAST(p.channel_order_time AS TIME) >= '{time_s}'
-              AND CAST(p.channel_order_time AS TIME) <  '{time_e}'
-            GROUP BY p.sales_channel, {week_case}
-        """)
-        base_by_ch = {}
-        for row in cur.fetchall():
-            ch = row[0]
-            wk = int(row[1]) - 1 if row[1] is not None else None
-            if wk is None: continue
-            if ch not in base_by_ch: base_by_ch[ch] = [0.0] * 8
-            base_by_ch[ch][wk] = float(row[2])
-
-        # Aggregate to platforms
         plat_today, plat_base = {}, {}
         for ch, pname in CHANNEL_MAP.items():
-            plat_today[pname] = plat_today.get(pname, 0.0) + today_by_ch.get(ch, 0.0)
-            b = base_by_ch.get(ch, [0.0] * 8)
+            plat_today[pname] = plat_today.get(pname, 0.0) + today_raw.get((ch, slot_min), 0.0)
             if pname not in plat_base: plat_base[pname] = [0.0] * 8
-            for i in range(8): plat_base[pname][i] += b[i]
+            for wk in range(8):
+                plat_base[pname][wk] += base_raw.get((ch, slot_min, wk), 0.0)
 
         for pname in platforms:
-            tod         = plat_today.get(pname, 0.0)
-            base, wks   = smart_baseline(plat_base.get(pname, [0.0] * 8))
-            ratio       = (tod / base) if base > 0 else None
+            tod       = plat_today.get(pname, 0.0)
+            base, wks = smart_baseline(plat_base.get(pname, [0.0] * 8))
+            ratio     = (tod / base) if base > 0 else None
             results[pname][label] = {
                 "orders":   tod,
                 "baseline": base,
                 "ratio":    ratio,
                 "wks":      wks,
             }
-
-    conn.close()
 
     slot_labels = [slot_label(s, e) for s, e in slots]
 
@@ -785,8 +789,9 @@ def print_daily_summary():
     print("  ▲ = Spike (ratio ≥ 1.5)   ▼ = Down (ratio ≤ 0.5)   - = insufficient baseline history")
     print("=" * 120 + "\n")
 
+# ─────────────────────────────────────────────
 if __name__ == "__main__":
-    print_daily_summary()          # ← add this line
+    print_daily_summary()
     found, emails = run()
     if found:
         print("\nDone — emails dispatched.")
