@@ -11,16 +11,17 @@ IST = timezone(timedelta(hours=5, minutes=30))
 # ─────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────
-TOP_ARTICLES = 5
-FLAGS_FILE   = "flagged_today.json"
-CONFIG_FILE  = "config.json"
+TOP_ARTICLES  = 5
+FLAGS_FILE    = "flagged_today.json"
+CONFIG_FILE   = "config.json"
+DOWN_MIN_BASE = 10  # baseline must be >= this to trigger a Down alert
 
 DEFAULT_THRESHOLDS = {
     "spike_ratio":         1.5,
-    "spike_min_orders":    100,
+    "spike_min_orders":    50,
     "down_ratio":          0.5,
     "discount_min_pct":    70,
-    "discount_min_orders": 5,
+    "discount_min_orders": 10,
 }
 
 # ─────────────────────────────────────────────
@@ -52,15 +53,14 @@ CHANNEL_FILTER = "p.sales_channel IN ({})".format(
 )
 
 # ─────────────────────────────────────────────
-# LOAD CONFIG  (local file)
+# LOAD CONFIG
 # ─────────────────────────────────────────────
 def load_config():
     if not os.path.exists(CONFIG_FILE):
         print("WARNING: config.json not found. Using defaults.")
         return {
-            "cc_all":      [],
-            "spoc_emails": {},
-            "thresholds":  {"_default": DEFAULT_THRESHOLDS.copy()}
+            "cc_all":     [],
+            "thresholds": {"_default": DEFAULT_THRESHOLDS.copy()}
         }
     with open(CONFIG_FILE, "r") as f:
         cfg = json.load(f)
@@ -70,34 +70,19 @@ def load_config():
 # ─────────────────────────────────────────────
 # CONFIG HELPERS
 # ─────────────────────────────────────────────
-def to_list(val):
-    """Converts single email string or list to a clean list."""
+def get_cc_emails(cfg):
+    """Returns cc_all as a list."""
+    val = cfg.get("cc_all", [])
     if not val:
         return []
     if isinstance(val, list):
         return [e.strip() for e in val if e.strip()]
     return [val.strip()] if val.strip() else []
 
-def get_cc_emails(cfg):
-    """Returns cc_all as a list."""
-    return to_list(cfg.get("cc_all", []))
-
-def get_platform_emails(cfg, platform):
-    """
-    Returns (to_list, cc_list) for a platform.
-    If platform has no SPOC → to_list is empty, falls back to cc_all.
-    """
-    spoc = to_list(cfg.get("spoc_emails", {}).get(platform, ""))
-    cc   = get_cc_emails(cfg)
-    if not spoc:
-        # No SPOC → send to cc_all only
-        return cc, []
-    return spoc, cc
-
 def get_platform_thresholds(cfg, platform):
     """
     Returns thresholds for a platform.
-    use_global=true → use _default values
+    use_global=true  → use _default values
     use_global=false → use platform specific values
     """
     default = cfg.get("thresholds", {}).get("_default", DEFAULT_THRESHOLDS)
@@ -306,14 +291,10 @@ def build_platform_email(platform, new_s1, old_s1, new_disc, old_disc, run_time_
 # ─────────────────────────────────────────────
 # SEND EMAIL  (placeholder — SMTP/Graph later)
 # ─────────────────────────────────────────────
-def send_email(to_emails, cc_emails, subject, body):
-    """
-    to_emails and cc_emails are always lists.
-    Placeholder — will be replaced with real email logic.
-    """
+def send_email(to_emails, subject, body):
+    """Placeholder — will be replaced with real email logic."""
     print(f"\n--- EMAIL ---")
     print(f"TO:      {', '.join(to_emails)}")
-    print(f"CC:      {', '.join(cc_emails)}")
     print(f"SUBJECT: {subject}")
     print(body)
     print("--- END EMAIL ---\n")
@@ -340,7 +321,7 @@ def run():
     cc_emails = get_cc_emails(cfg)
 
     print(f"Surge Watchdog running at {run_time_str} IST")
-    print(f"CC Emails: {cc_emails or 'not set'}")
+    print(f"TO Emails: {cc_emails or 'not set'}")
     for s, e in slots:
         print(f"  Checking slot: {slot_label(s, e)}")
 
@@ -449,7 +430,7 @@ def run():
             issues = set()
             if base > 0 and tod >= t["spike_min_orders"] and (tod / base) >= t["spike_ratio"]:
                 issues.add("Spike")
-            if base > 0 and tod > 0 and (tod / base) <= t["down_ratio"]:
+            if base >= DOWN_MIN_BASE and tod > 0 and (tod / base) <= t["down_ratio"]:
                 issues.add("Down")
             if not issues: continue
 
@@ -599,23 +580,21 @@ def run():
     for v in new_s1.values():   affected_platforms.add(v["platform"])
     for v in new_disc.values(): affected_platforms.add(v["platform"])
 
+    if not cc_emails:
+        print("WARNING: cc_all is empty in config. No emails sent.")
+        return True, {}
+
     emails_sent = {}
 
     for platform in sorted(affected_platforms):
-        to_emails, cc_list = get_platform_emails(cfg, platform)
-
-        if not to_emails:
-            print(f"WARNING: No email set for {platform} and cc_all is empty. Skipping.")
-            continue
-
         body    = build_platform_email(
             platform, new_s1, old_s1,
             new_disc, old_disc, run_time_str
         )
         subject = f"PUMA ECOM ALERT — {platform} | {run_time_str} IST"
 
-        send_email(to_emails, cc_list, subject, body)
-        emails_sent[platform] = to_emails
+        send_email(cc_emails, subject, body)
+        emails_sent[platform] = cc_emails
 
         with open(f"surge_report_{platform}.txt", "w") as f:
             f.write(body)
@@ -670,9 +649,7 @@ def print_daily_summary():
     )
 
     platforms = sorted(set(CHANNEL_MAP.values()))
-
-    # Collect results: {platform: {slot_label: {orders, baseline, ratio, wks}}}
-    results = {p: {} for p in platforms}
+    results   = {p: {} for p in platforms}
 
     # ── Single query: today all slots ──
     cur.execute(f"""
@@ -687,7 +664,7 @@ def print_daily_summary():
                  DATEPART(HOUR, p.channel_order_time) * 60 +
                  (DATEPART(MINUTE, p.channel_order_time) / 30) * 30
     """)
-    today_raw = {}  # {(channel, slot_min): orders}
+    today_raw = {}
     for row in cur.fetchall():
         today_raw[(row[0], int(row[1]))] = float(row[2])
 
@@ -706,7 +683,7 @@ def print_daily_summary():
                  DATEPART(HOUR, p.channel_order_time) * 60 +
                  (DATEPART(MINUTE, p.channel_order_time) / 30) * 30
     """)
-    base_raw = {}  # {(channel, slot_min, week_idx): orders}
+    base_raw = {}
     for row in cur.fetchall():
         wk = int(row[1]) - 1 if row[1] is not None else None
         if wk is None: continue
@@ -759,12 +736,12 @@ def print_daily_summary():
                 ratio_str = "       -"
             else:
                 r    = d["ratio"]
-                flag = " ▲" if r >= 1.5 else (" ▼" if r <= 0.5 else "  ")
+                flag = " ▲" if r >= 1.5 else (" ▼" if r <= 0.5 and base >= DOWN_MIN_BASE else "  ")
                 ratio_str = f"{r:>6.2f}x{flag}"
             print(f"  {lbl:<20} {tod:>8,} {base:>10,} {ratio_str:>10}")
 
     print("\n" + "=" * 70)
-    print("  ▲ = Spike (ratio ≥ 1.5)   ▼ = Down (ratio ≤ 0.5)")
+    print("  ▲ = Spike (ratio ≥ 1.5)   ▼ = Down (ratio ≤ 0.5, baseline ≥ 10)")
     print("  - = insufficient baseline history")
     print("=" * 70 + "\n")
 
