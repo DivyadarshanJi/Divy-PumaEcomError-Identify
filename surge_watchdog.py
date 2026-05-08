@@ -81,7 +81,6 @@ def get_cc_emails(cfg):
 
 def get_platform_thresholds(cfg, platform):
     """
-    Returns thresholds for a platform.
     use_global=true  → use _default values
     use_global=false → use platform specific values
     """
@@ -187,88 +186,43 @@ def save_flags(flags):
         json.dump(flags, f, indent=2)
 
 # ─────────────────────────────────────────────
-# REPORT HELPERS
+# BUILD EMAIL BODY  (single email, all platforms)
+# Section 1 = High Discount
+# Section 2 = Spike / Down
 # ─────────────────────────────────────────────
-def art_str(articles):
-    if not articles: return "-"
-    parts = []
-    for a in articles:
-        d = f"{a['discount']*100:.0f}%"
-        parts.append(f"{a['article']} ({int(a['orders'])} orders, {d} disc)")
-    return ",  ".join(parts)
-
-def s1_row_line(r, w):
-    return (
-        f"{r['platform']:<{w[0]}} {r['slot']:<{w[1]}} "
-        f"{r['issue']:<{w[2]}} {int(r['orders']):>{w[3]},} "
-        f"{int(r['baseline']):>{w[4]},} {r['ratio']:>{w[5]}.2f}x  "
-        f"{art_str(r['articles'])}"
-    )
-
-# ─────────────────────────────────────────────
-# BUILD EMAIL BODY
-# ─────────────────────────────────────────────
-def build_platform_email(platform, new_s1, old_s1, new_disc, old_disc, run_time_str):
-    W   = [13, 18, 7, 7, 9, 5]
-    HDR = (f"{'Platform':<{W[0]}} {'Time Slot':<{W[1]}} {'Issue':<{W[2]}} "
-           f"{'Orders':>{W[3]}} {'Baseline':>{W[4]}} {'Ratio':>{W[5]+1}}  "
-           f"Top Articles (Orders, Discount%)")
-    SEP = "-" * 95
+def build_email(new_s1, old_s1, new_disc, old_disc, run_time_str):
+    SEP  = "=" * 95
+    DASH = "-" * 95
 
     lines = []
-    lines.append("=" * 95)
-    lines.append(f"PUMA ECOM ALERT — {platform}  |  {run_time_str} IST")
-    lines.append("=" * 95)
+    lines.append(SEP)
+    lines.append(f"PUMA ECOM ALERT  |  {run_time_str} IST")
+    lines.append(SEP)
 
-    # Section 1
-    p_new_s1 = {k: v for k, v in new_s1.items() if v["platform"] == platform}
-    p_old_s1 = {k: v for k, v in old_s1.items() if v["platform"] == platform}
-
-    if p_new_s1 or p_old_s1:
+    # ── SECTION 1 — HIGH DISCOUNT ──
+    if new_disc or old_disc:
         lines.append("")
-        lines.append("SECTION 1 — ORDER SPIKE / DOWN")
+        lines.append("SECTION 1 — HIGH DISCOUNT ARTICLES")
         lines.append("")
-        if p_new_s1:
-            lines.append("  NEW ISSUES")
-            lines.append("  " + SEP)
-            lines.append("  " + HDR)
-            lines.append("  " + SEP)
-            for r in sorted(p_new_s1.values(), key=lambda x: x["slot"]):
-                lines.append("  " + s1_row_line(r, W))
-            lines.append("")
-        if p_old_s1:
-            lines.append("  PAST ISSUES  (flagged earlier today)")
-            lines.append("  " + SEP)
-            lines.append("  " + HDR)
-            lines.append("  " + SEP)
-            for r in sorted(p_old_s1.values(), key=lambda x: x["slot"]):
-                lines.append("  " + s1_row_line(r, W))
-            lines.append("")
 
-    # Section 2
-    p_new_disc = {k: v for k, v in new_disc.items() if v["platform"] == platform}
-    p_old_disc = {k: v for k, v in old_disc.items() if v["platform"] == platform}
-
-    if p_new_disc or p_old_disc:
         disc_hdr = (f"  {'Platform':<13} {'Article':<13} "
                     f"{'Orders':>10} {'Discount%':>10}  {'First Flagged'}")
         disc_sep = "  " + "-" * 65
-        lines.append("=" * 70)
-        lines.append("SECTION 2 — HIGH DISCOUNT ARTICLES")
-        lines.append("")
-        if p_new_disc:
+
+        if new_disc:
             lines.append("  NEW FLAGS")
             lines.append(disc_sep)
             lines.append(disc_hdr)
             lines.append(disc_sep)
-            for r in sorted(p_new_disc.values(), key=lambda x: -x["orders"]):
+            for r in sorted(new_disc.values(), key=lambda x: (x["platform"], -x["orders"])):
                 lines.append(
                     f"  {r['platform']:<13} {r['article']:<13} "
                     f"{int(r['orders']):>10,} {r['discount']*100:>9.1f}%  "
                     f"{r['first_flagged']}"
                 )
             lines.append("")
-        if p_old_disc:
+
+        if old_disc:
             lines.append("  PAST FLAGS  (flagged earlier today — current orders shown)")
             lines.append(disc_sep)
             lines.append(
@@ -276,7 +230,7 @@ def build_platform_email(platform, new_s1, old_s1, new_disc, old_disc, run_time_
                 f"{'Curr Orders':>11} {'Discount%':>10}  {'First Flagged'}"
             )
             lines.append(disc_sep)
-            for r in sorted(p_old_disc.values(), key=lambda x: -x.get("current_orders", 0)):
+            for r in sorted(old_disc.values(), key=lambda x: (x["platform"], -x.get("current_orders", 0))):
                 lines.append(
                     f"  {r['platform']:<13} {r['article']:<13} "
                     f"{int(r.get('current_orders', r.get('first_orders', 0))):>11,} "
@@ -285,7 +239,42 @@ def build_platform_email(platform, new_s1, old_s1, new_disc, old_disc, run_time_
                 )
             lines.append("")
 
-    lines.append("=" * 95)
+    # ── SECTION 2 — SPIKE / DOWN ──
+    if new_s1 or old_s1:
+        lines.append(SEP)
+        lines.append("")
+        lines.append("SECTION 2 — ORDER SPIKE / DOWN")
+        lines.append("")
+
+        HDR = (f"  {'Platform':<13} {'Time Slot':<18} {'Issue':<7} "
+               f"{'Orders':>7} {'Baseline':>9} {'Ratio':>6}")
+        ROW_SEP = "  " + "-" * 65
+
+        def s2_block(data, label):
+            lines.append(f"  {label}")
+            lines.append(ROW_SEP)
+            lines.append(HDR)
+            lines.append(ROW_SEP)
+            for r in sorted(data.values(), key=lambda x: (x["platform"], x["slot"])):
+                lines.append(
+                    f"  {r['platform']:<13} {r['slot']:<18} {r['issue']:<7} "
+                    f"{int(r['orders']):>7,} {int(r['baseline']):>9,} {r['ratio']:>6.2f}x"
+                )
+                # Top articles — one per line
+                for a in r.get("articles", []):
+                    d = f"{a['discount']*100:.0f}%"
+                    lines.append(
+                        f"  {'':13} {'':18} {'':7}   "
+                        f"  → {a['article']}  {int(a['orders'])} orders  {d} disc"
+                    )
+                lines.append("")
+
+        if new_s1:
+            s2_block(new_s1, "NEW ISSUES")
+        if old_s1:
+            s2_block(old_s1, "PAST ISSUES  (flagged earlier today)")
+
+    lines.append(SEP)
     return "\n".join(lines)
 
 # ─────────────────────────────────────────────
@@ -316,7 +305,6 @@ def run():
         " END"
     )
 
-    # ── Load config ──
     cfg       = load_config()
     cc_emails = get_cc_emails(cfg)
 
@@ -336,7 +324,7 @@ def run():
     )
 
     # ─────────────────────────────────────────
-    # SECTION 1 — SPIKE / DOWN
+    # SPIKE / DOWN
     # ─────────────────────────────────────────
     current_s1 = {}
 
@@ -345,7 +333,6 @@ def run():
         time_s = slot_start.strftime("%H:%M:%S")
         time_e = slot_end.strftime("%H:%M:%S")
 
-        # Today orders
         cur.execute(f"""
             SELECT p.sales_channel,
                    SUM(p.order_qty - p.cancelled_qty) AS orders
@@ -358,7 +345,6 @@ def run():
         """)
         today_by_ch = {row[0]: float(row[1]) for row in cur.fetchall()}
 
-        # Baseline
         cur.execute(f"""
             SELECT p.sales_channel,
                    {week_case} AS week_num,
@@ -378,7 +364,6 @@ def run():
             if ch not in base_by_ch: base_by_ch[ch] = [0.0] * 8
             base_by_ch[ch][wk] = float(row[2])
 
-        # Articles
         cur.execute(f"""
             SELECT p.sales_channel,
                    TRY_CAST(LTRIM(REPLACE(UPPER(p.Style),'IN','')) AS BIGINT) AS article,
@@ -410,7 +395,6 @@ def run():
             if pname not in art_by_plat: art_by_plat[pname] = []
             art_by_plat[pname].append({"article": art, "orders": ords, "discount": disc})
 
-        # Aggregate channels → platforms
         plat_today, plat_base = {}, {}
         for ch, pname in CHANNEL_MAP.items():
             plat_today[pname] = plat_today.get(pname, 0.0) + today_by_ch.get(ch, 0.0)
@@ -418,7 +402,6 @@ def run():
             if pname not in plat_base: plat_base[pname] = [0.0] * 8
             for i in range(8): plat_base[pname][i] += b[i]
 
-        # Spike / Down
         for pname in set(CHANNEL_MAP.values()):
             tod       = plat_today.get(pname, 0.0)
             base, wks = smart_baseline(plat_base.get(pname, [0.0] * 8))
@@ -455,7 +438,7 @@ def run():
             }
 
     # ─────────────────────────────────────────
-    # SECTION 2 — HIGH DISCOUNT
+    # HIGH DISCOUNT
     # ─────────────────────────────────────────
     cur.execute(f"""
         SELECT p.sales_channel,
@@ -573,40 +556,27 @@ def run():
     flags["articles"]       = past_disc
     save_flags(flags)
 
-    # ─────────────────────────────────────────
-    # EMAIL PER PLATFORM
-    # ─────────────────────────────────────────
-    affected_platforms = set()
-    for v in new_s1.values():   affected_platforms.add(v["platform"])
-    for v in new_disc.values(): affected_platforms.add(v["platform"])
-
     if not cc_emails:
         print("WARNING: cc_all is empty in config. No emails sent.")
         return True, {}
 
-    emails_sent = {}
+    # ─────────────────────────────────────────
+    # SINGLE EMAIL — all platforms combined
+    # ─────────────────────────────────────────
+    body    = build_email(new_s1, old_s1, new_disc, old_disc, run_time_str)
+    subject = f"PUMA ECOM ALERT | {run_time_str} IST"
 
-    for platform in sorted(affected_platforms):
-        body    = build_platform_email(
-            platform, new_s1, old_s1,
-            new_disc, old_disc, run_time_str
-        )
-        subject = f"PUMA ECOM ALERT — {platform} | {run_time_str} IST"
+    send_email(cc_emails, subject, body)
 
-        send_email(cc_emails, subject, body)
-        emails_sent[platform] = cc_emails
-
-        with open(f"surge_report_{platform}.txt", "w") as f:
-            f.write(body)
+    with open("surge_report.txt", "w") as f:
+        f.write(body)
 
     print(f"\nSummary:")
     print(f"  New spike/down : {len(new_s1)}")
     print(f"  New discounts  : {len(new_disc)}")
-    print(f"  Emails sent    : {len(emails_sent)}")
-    for p, e in emails_sent.items():
-        print(f"    {p} → {', '.join(e)}")
+    print(f"  Email sent to  : {', '.join(cc_emails)}")
 
-    return True, emails_sent
+    return True, cc_emails
 
 # ─────────────────────────────────────────────
 # DAILY SUMMARY — all 30-min slots midnight to now
@@ -623,7 +593,6 @@ def print_daily_summary():
     )
     cfg = load_config()
 
-    # Build all 30-min slots from 00:00 to now
     slots = []
     cursor = now.replace(hour=0, minute=0, second=0, microsecond=0)
     summary_end = now.replace(second=0, microsecond=0)
@@ -651,7 +620,6 @@ def print_daily_summary():
     platforms = sorted(set(CHANNEL_MAP.values()))
     results   = {p: {} for p in platforms}
 
-    # ── Single query: today all slots ──
     cur.execute(f"""
         SELECT p.sales_channel,
                DATEPART(HOUR, p.channel_order_time) * 60 +
@@ -668,7 +636,6 @@ def print_daily_summary():
     for row in cur.fetchall():
         today_raw[(row[0], int(row[1]))] = float(row[2])
 
-    # ── Single query: baseline all slots ──
     cur.execute(f"""
         SELECT p.sales_channel,
                {week_case} AS week_num,
@@ -691,7 +658,6 @@ def print_daily_summary():
 
     conn.close()
 
-    # ── Slice in Python per slot ──
     for slot_start, slot_end in slots:
         label    = slot_label(slot_start, slot_end)
         slot_min = slot_start.hour * 60 + slot_start.minute
@@ -716,7 +682,6 @@ def print_daily_summary():
 
     slot_labels = [slot_label(s, e) for s, e in slots]
 
-    # ── Print ──
     print("\n" + "=" * 70)
     print(f"  DAILY SUMMARY — {today_str}  |  Generated {time_label(now)} IST")
     print("=" * 70)
