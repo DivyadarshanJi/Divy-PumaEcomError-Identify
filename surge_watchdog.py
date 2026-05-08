@@ -205,39 +205,59 @@ def build_email(new_s1, old_s1, new_disc, old_disc, run_time_str):
         lines.append("SECTION 1 — HIGH DISCOUNT ARTICLES")
         lines.append("")
 
-        disc_hdr = (f"  {'Platform':<13} {'Article':<13} "
+        disc_hdr = (f"  {'Article':<13} "
                     f"{'Orders':>10} {'Discount%':>10}  {'First Flagged'}")
-        disc_sep = "  " + "-" * 65
+        disc_sep = "  " + "-" * 55
 
-        if new_disc:
-            lines.append("  NEW FLAGS")
-            lines.append(disc_sep)
-            lines.append(disc_hdr)
-            lines.append(disc_sep)
-            for r in sorted(new_disc.values(), key=lambda x: (x["platform"], -x["orders"])):
-                lines.append(
-                    f"  {r['platform']:<13} {r['article']:<13} "
-                    f"{int(r['orders']):>10,} {r['discount']*100:>9.1f}%  "
-                    f"{r['first_flagged']}"
-                )
-            lines.append("")
+        # Gather all platforms that have any disc flags, sorted by most recent first_flagged
+        all_disc_plats = set(r["platform"] for r in new_disc.values()) |                          set(r["platform"] for r in old_disc.values())
 
-        if old_disc:
-            lines.append("  PAST FLAGS  (flagged earlier today — current orders shown)")
-            lines.append(disc_sep)
-            lines.append(
-                f"  {'Platform':<13} {'Article':<13} "
-                f"{'Curr Orders':>11} {'Discount%':>10}  {'First Flagged'}"
+        def latest_flagged(pname):
+            times = (
+                [r["first_flagged"] for r in new_disc.values() if r["platform"] == pname] +
+                [r["first_flagged"] for r in old_disc.values()  if r["platform"] == pname]
             )
-            lines.append(disc_sep)
-            for r in sorted(old_disc.values(), key=lambda x: (x["platform"], -x.get("current_orders", 0))):
+            return max(times) if times else ""
+
+        plats_sorted = sorted(all_disc_plats, key=lambda p: latest_flagged(p), reverse=True)
+
+        for pname in plats_sorted:
+            p_new = {k: v for k, v in new_disc.items() if v["platform"] == pname}
+            p_old = {k: v for k, v in old_disc.items()  if v["platform"] == pname}
+
+            lines.append(f"  {'─'*55}")
+            lines.append(f"  {pname}")
+            lines.append(f"  {'─'*55}")
+
+            if p_new:
+                lines.append("    NEW FLAGS")
+                lines.append("    " + disc_sep)
+                lines.append("    " + disc_hdr)
+                lines.append("    " + disc_sep)
+                for r in sorted(p_new.values(), key=lambda x: -x["orders"]):
+                    lines.append(
+                        f"    {r['article']:<13} "
+                        f"{int(r['orders']):>10,} {r['discount']*100:>9.1f}%  "
+                        f"{r['first_flagged']}"
+                    )
+                lines.append("")
+
+            if p_old:
+                lines.append("    PAST FLAGS  (flagged earlier today — current orders shown)")
+                lines.append("    " + disc_sep)
                 lines.append(
-                    f"  {r['platform']:<13} {r['article']:<13} "
-                    f"{int(r.get('current_orders', r.get('first_orders', 0))):>11,} "
-                    f"{r['discount']*100:>9.1f}%  "
-                    f"{r['first_flagged']}"
+                    f"    {'Article':<13} "
+                    f"{'Curr Orders':>11} {'Discount%':>10}  {'First Flagged'}"
                 )
-            lines.append("")
+                lines.append("    " + disc_sep)
+                for r in sorted(p_old.values(), key=lambda x: -x.get("current_orders", 0)):
+                    lines.append(
+                        f"    {r['article']:<13} "
+                        f"{int(r.get('current_orders', r.get('first_orders', 0))):>11,} "
+                        f"{r['discount']*100:>9.1f}%  "
+                        f"{r['first_flagged']}"
+                    )
+                lines.append("")
 
     # ── SECTION 2 — SPIKE / DOWN ──
     if new_s1 or old_s1:
@@ -246,33 +266,65 @@ def build_email(new_s1, old_s1, new_disc, old_disc, run_time_str):
         lines.append("SECTION 2 — ORDER SPIKE / DOWN")
         lines.append("")
 
-        HDR = (f"  {'Platform':<13} {'Time Slot':<18} {'Issue':<7} "
-               f"{'Orders':>7} {'Baseline':>9} {'Ratio':>6}")
-        ROW_SEP = "  " + "-" * 65
+        HDR     = (f"  {'Time Slot':<18} {'Issue':<7} "
+                   f"{'Orders':>7} {'Baseline':>9} {'Ratio':>6}")
+        ROW_SEP = "  " + "-" * 55
 
-        def s2_block(data, label):
-            lines.append(f"  {label}")
-            lines.append(ROW_SEP)
-            lines.append(HDR)
-            lines.append(ROW_SEP)
-            for r in sorted(data.values(), key=lambda x: (x["platform"], x["slot"])):
-                lines.append(
-                    f"  {r['platform']:<13} {r['slot']:<18} {r['issue']:<7} "
-                    f"{int(r['orders']):>7,} {int(r['baseline']):>9,} {r['ratio']:>6.2f}x"
-                )
-                # Top articles — one per line
-                for a in r.get("articles", []):
-                    d = f"{a['discount']*100:.0f}%"
+        # Gather all platforms, sort by most recent first_flagged
+        all_s1_plats = set(r["platform"] for r in new_s1.values()) |                        set(r["platform"] for r in old_s1.values())
+
+        def latest_s1_time(pname):
+            times = (
+                [r["first_flagged"] for r in new_s1.values() if r["platform"] == pname] +
+                [r["first_flagged"] for r in old_s1.values() if r["platform"] == pname]
+            )
+            return max(times) if times else ""
+
+        s1_plats_sorted = sorted(all_s1_plats, key=lambda p: latest_s1_time(p), reverse=True)
+
+        for pname in s1_plats_sorted:
+            p_new = {k: v for k, v in new_s1.items() if v["platform"] == pname}
+            p_old = {k: v for k, v in old_s1.items() if v["platform"] == pname}
+
+            lines.append(f"  {'─'*55}")
+            lines.append(f"  {pname}")
+            lines.append(f"  {'─'*55}")
+
+            if p_new:
+                lines.append("    NEW ISSUES")
+                lines.append("    " + ROW_SEP)
+                lines.append("    " + HDR)
+                lines.append("    " + ROW_SEP)
+                for r in sorted(p_new.values(), key=lambda x: x["slot"], reverse=True):
                     lines.append(
-                        f"  {'':13} {'':18} {'':7}   "
-                        f"  → {a['article']}  {int(a['orders'])} orders  {d} disc"
+                        f"    {r['slot']:<18} {r['issue']:<7} "
+                        f"{int(r['orders']):>7,} {int(r['baseline']):>9,} {r['ratio']:>6.2f}x"
                     )
+                    for a in r.get("articles", []):
+                        d = f"{a['discount']*100:.0f}%"
+                        lines.append(
+                            f"    {'':18} {'':7}   "
+                            f"  → {a['article']}  {int(a['orders'])} orders  {d} disc"
+                        )
                 lines.append("")
 
-        if new_s1:
-            s2_block(new_s1, "NEW ISSUES")
-        if old_s1:
-            s2_block(old_s1, "PAST ISSUES  (flagged earlier today)")
+            if p_old:
+                lines.append("    PAST ISSUES  (flagged earlier today)")
+                lines.append("    " + ROW_SEP)
+                lines.append("    " + HDR)
+                lines.append("    " + ROW_SEP)
+                for r in sorted(p_old.values(), key=lambda x: x["slot"], reverse=True):
+                    lines.append(
+                        f"    {r['slot']:<18} {r['issue']:<7} "
+                        f"{int(r['orders']):>7,} {int(r['baseline']):>9,} {r['ratio']:>6.2f}x"
+                    )
+                    for a in r.get("articles", []):
+                        d = f"{a['discount']*100:.0f}%"
+                        lines.append(
+                            f"    {'':18} {'':7}   "
+                            f"  → {a['article']}  {int(a['orders'])} orders  {d} disc"
+                        )
+                lines.append("")
 
     lines.append(SEP)
     return "\n".join(lines)
@@ -682,11 +734,15 @@ def print_daily_summary():
 
     slot_labels = [slot_label(s, e) for s, e in slots]
 
+    # Sort platforms by total orders today (descending)
+    platform_totals  = {p: sum(results[p][lbl]["orders"] for lbl in slot_labels) for p in platforms}
+    platforms_sorted = sorted(platforms, key=lambda p: -platform_totals[p])
+
     print("\n" + "=" * 70)
     print(f"  DAILY SUMMARY — {today_str}  |  Generated {time_label(now)} IST")
     print("=" * 70)
 
-    for pname in platforms:
+    for pname in platforms_sorted:
         print(f"\n{'─'*70}")
         print(f"  {pname}")
         print(f"{'─'*70}")
