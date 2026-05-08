@@ -630,7 +630,163 @@ def run():
     return True, emails_sent
 
 # ─────────────────────────────────────────────
+# DAILY SUMMARY — all 30-min slots midnight to now
+# ─────────────────────────────────────────────
+def print_daily_summary():
+    now        = now_ist()
+    today_str  = now.strftime("%Y-%m-%d")
+    base_dates = get_baseline_dates()
+    base_in    = ",".join(f"'{d}'" for d in base_dates)
+    week_case  = (
+        "CASE CAST(p.channel_order_time AS DATE) " +
+        " ".join(f"WHEN '{d}' THEN {i+1}" for i, d in enumerate(base_dates)) +
+        " END"
+    )
+    cfg = load_config()
+
+    # Build all 30-min slots from 00:00 to now
+  slots = []
+    cursor = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    summary_end = now.replace(second=0, microsecond=0)
+    summary_end = summary_end.replace(minute=0 if summary_end.minute < 30 else 30)
+    while cursor < summary_end:
+        s = cursor
+        e = cursor + timedelta(minutes=30)
+        slots.append((s, e))
+        cursor = e
+
+    if not slots:
+        print("No complete slots yet today.")
+        return
+
+    conn = get_connection()
+    cur  = conn.cursor()
+
+    base_cond = (
+        "p.order_status NOT IN ('cancelled','unfulfillable') "
+        "AND p.order_type='SALES' "
+        "AND (p.order_qty - p.cancelled_qty) > 0 "
+        f"AND {CHANNEL_FILTER}"
+    )
+
+    platforms = sorted(set(CHANNEL_MAP.values()))
+
+    # Collect results: {platform: {slot_label: {orders, baseline, ratio}}}
+    results = {p: {} for p in platforms}
+
+    for slot_start, slot_end in slots:
+        label  = slot_label(slot_start, slot_end)
+        time_s = slot_start.strftime("%H:%M:%S")
+        time_e = slot_end.strftime("%H:%M:%S")
+
+        # Today orders
+        cur.execute(f"""
+            SELECT p.sales_channel,
+                   SUM(p.order_qty - p.cancelled_qty) AS orders
+            FROM PUMA_ECOM.dbo.PUMA_Discount_ALert p
+            WHERE {base_cond}
+              AND CAST(p.channel_order_time AS DATE) = '{today_str}'
+              AND CAST(p.channel_order_time AS TIME) >= '{time_s}'
+              AND CAST(p.channel_order_time AS TIME) <  '{time_e}'
+            GROUP BY p.sales_channel
+        """)
+        today_by_ch = {row[0]: float(row[1]) for row in cur.fetchall()}
+
+        # Baseline
+        cur.execute(f"""
+            SELECT p.sales_channel,
+                   {week_case} AS week_num,
+                   SUM(p.order_qty - p.cancelled_qty) AS orders
+            FROM PUMA_ECOM.dbo.PUMA_Discount_ALert p
+            WHERE {base_cond}
+              AND CAST(p.channel_order_time AS DATE) IN ({base_in})
+              AND CAST(p.channel_order_time AS TIME) >= '{time_s}'
+              AND CAST(p.channel_order_time AS TIME) <  '{time_e}'
+            GROUP BY p.sales_channel, {week_case}
+        """)
+        base_by_ch = {}
+        for row in cur.fetchall():
+            ch = row[0]
+            wk = int(row[1]) - 1 if row[1] is not None else None
+            if wk is None: continue
+            if ch not in base_by_ch: base_by_ch[ch] = [0.0] * 8
+            base_by_ch[ch][wk] = float(row[2])
+
+        # Aggregate to platforms
+        plat_today, plat_base = {}, {}
+        for ch, pname in CHANNEL_MAP.items():
+            plat_today[pname] = plat_today.get(pname, 0.0) + today_by_ch.get(ch, 0.0)
+            b = base_by_ch.get(ch, [0.0] * 8)
+            if pname not in plat_base: plat_base[pname] = [0.0] * 8
+            for i in range(8): plat_base[pname][i] += b[i]
+
+        for pname in platforms:
+            tod         = plat_today.get(pname, 0.0)
+            base, wks   = smart_baseline(plat_base.get(pname, [0.0] * 8))
+            ratio       = (tod / base) if base > 0 else None
+            results[pname][label] = {
+                "orders":   tod,
+                "baseline": base,
+                "ratio":    ratio,
+                "wks":      wks,
+            }
+
+    conn.close()
+
+    slot_labels = [slot_label(s, e) for s, e in slots]
+
+    # ── Print ──
+    print("\n" + "=" * 120)
+    print(f"  DAILY SUMMARY — {today_str}  |  All 30-min slots midnight → now  |  Generated {time_label(now)} IST")
+    print("=" * 120)
+
+    COL_W = 16  # width per slot column
+
+    for pname in platforms:
+        print(f"\n{'─'*120}")
+        print(f"  {pname}")
+        print(f"{'─'*120}")
+
+        # Header row
+        hdr = f"  {'Metric':<12}"
+        for lbl in slot_labels:
+            hdr += f"  {lbl:>{COL_W}}"
+        print(hdr)
+        print(f"  {'-'*12}" + (f"  {'-'*COL_W}" * len(slot_labels)))
+
+        # Orders row
+        row_o = f"  {'Orders':<12}"
+        for lbl in slot_labels:
+            v = results[pname][lbl]["orders"]
+            row_o += f"  {int(v):>{COL_W},}"
+        print(row_o)
+
+        # Baseline row
+        row_b = f"  {'Baseline':<12}"
+        for lbl in slot_labels:
+            v = results[pname][lbl]["baseline"]
+            row_b += f"  {int(v):>{COL_W},}"
+        print(row_b)
+
+        # Ratio row  (flag spike/down inline)
+        row_r = f"  {'Ratio':<12}"
+        for lbl in slot_labels:
+            d = results[pname][lbl]
+            if d["ratio"] is None or d["wks"] < 3:
+                cell = "  -"
+            else:
+                r    = d["ratio"]
+                flag = " ▲" if r >= 1.5 else (" ▼" if r <= 0.5 else "  ")
+                cell = f"{r:>6.2f}x{flag}"
+            row_r += f"  {cell:>{COL_W}}"
+        print(row_r)
+
+    print("\n" + "=" * 120)
+    print("  ▲ = Spike (ratio ≥ 1.5)   ▼ = Down (ratio ≤ 0.5)   - = insufficient baseline history")
+    print("=" * 120 + "\n")
+
 if __name__ == "__main__":
+    print_daily_summary()          # ← add this line
     found, emails = run()
     if found:
         print("\nDone — emails dispatched.")
