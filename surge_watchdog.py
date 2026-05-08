@@ -770,9 +770,9 @@ def print_daily_summary():
 
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
-    print_daily_summary()
     found, emails = run()
     if found:
         print("\nDone — emails dispatched.")
     else:
         print("\nAll clear — no email sent.")
+    print_daily_summary()
