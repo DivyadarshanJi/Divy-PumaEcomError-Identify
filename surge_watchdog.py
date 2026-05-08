@@ -740,54 +740,33 @@ def print_daily_summary():
     slot_labels = [slot_label(s, e) for s, e in slots]
 
     # ── Print ──
-    print("\n" + "=" * 120)
-    print(f"  DAILY SUMMARY — {today_str}  |  All 30-min slots midnight → now  |  Generated {time_label(now)} IST")
-    print("=" * 120)
-
-    COL_W = 16  # width per slot column
+    print("\n" + "=" * 70)
+    print(f"  DAILY SUMMARY — {today_str}  |  Generated {time_label(now)} IST")
+    print("=" * 70)
 
     for pname in platforms:
-        print(f"\n{'─'*120}")
+        print(f"\n{'─'*70}")
         print(f"  {pname}")
-        print(f"{'─'*120}")
+        print(f"{'─'*70}")
+        print(f"  {'Slot':<20} {'Orders':>8} {'Baseline':>10} {'Ratio':>10}")
+        print(f"  {'-'*20} {'-'*8} {'-'*10} {'-'*10}")
 
-        # Header row
-        hdr = f"  {'Metric':<12}"
         for lbl in slot_labels:
-            hdr += f"  {lbl:>{COL_W}}"
-        print(hdr)
-        print(f"  {'-'*12}" + (f"  {'-'*COL_W}" * len(slot_labels)))
-
-        # Orders row
-        row_o = f"  {'Orders':<12}"
-        for lbl in slot_labels:
-            v = results[pname][lbl]["orders"]
-            row_o += f"  {int(v):>{COL_W},}"
-        print(row_o)
-
-        # Baseline row
-        row_b = f"  {'Baseline':<12}"
-        for lbl in slot_labels:
-            v = results[pname][lbl]["baseline"]
-            row_b += f"  {int(v):>{COL_W},}"
-        print(row_b)
-
-        # Ratio row  (flag spike/down inline)
-        row_r = f"  {'Ratio':<12}"
-        for lbl in slot_labels:
-            d = results[pname][lbl]
+            d    = results[pname][lbl]
+            tod  = int(d["orders"])
+            base = int(d["baseline"])
             if d["ratio"] is None or d["wks"] < 3:
-                cell = "  -"
+                ratio_str = "       -"
             else:
                 r    = d["ratio"]
                 flag = " ▲" if r >= 1.5 else (" ▼" if r <= 0.5 else "  ")
-                cell = f"{r:>6.2f}x{flag}"
-            row_r += f"  {cell:>{COL_W}}"
-        print(row_r)
+                ratio_str = f"{r:>6.2f}x{flag}"
+            print(f"  {lbl:<20} {tod:>8,} {base:>10,} {ratio_str:>10}")
 
-    print("\n" + "=" * 120)
-    print("  ▲ = Spike (ratio ≥ 1.5)   ▼ = Down (ratio ≤ 0.5)   - = insufficient baseline history")
-    print("=" * 120 + "\n")
+    print("\n" + "=" * 70)
+    print("  ▲ = Spike (ratio ≥ 1.5)   ▼ = Down (ratio ≤ 0.5)")
+    print("  - = insufficient baseline history")
+    print("=" * 70 + "\n")
 
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
