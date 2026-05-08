@@ -1,14 +1,12 @@
 {
   "_readme": {
-    "cc_all": "Receives ALL alerts from ALL platforms. Can be a single email or a list.",
-    "spoc_emails": "Each platform SPOC receives alerts only for their platform. Can be single email or list. If empty, alert goes to cc_all only.",
-    "use_global": "true = use _default thresholds. false = use this platform's custom thresholds.",
-    "_default": "These values apply to all platforms where use_global is true.",
-    "examples": {
-      "single_email": "spoc@puma.com",
-      "multiple_emails": ["spoc1@puma.com", "spoc2@puma.com"],
-      "no_email": ""
-    }
+    "cc_all":                "Global recipients — receive ALL alerts from ALL platforms.",
+    "spike_ratio":           "Alert if today orders / baseline >= this value.",
+    "spike_min_orders":      "Minimum today orders required to trigger a spike alert. Filters out noise on low-volume platforms.",
+    "down_ratio":            "Alert if today orders / baseline <= this value.",
+    "discount_min_pct":      "Alert if article discount >= this percentage.",
+    "discount_min_orders":   "Minimum orders for an article to trigger a discount alert.",
+    "use_global":            "true = use _default thresholds for this platform. false = use this platform's own values."
   },
 
   "cc_all": [
@@ -17,21 +15,7 @@
     "manager3@puma.com"
   ],
 
-  "spoc_emails": {
-    "Myntra":      ["myntra.spoc1@puma.com", "myntra.spoc2@puma.com"],
-    "Amazon":      "amazon.spoc@puma.com",
-    "Flipkart":    "flipkart.spoc@puma.com",
-    "Nykaa":       "nykaa.spoc@puma.com",
-    "Ajio":        "ajio.spoc@puma.com",
-    "TataCliq":    "tatacliq.spoc@puma.com",
-    "TataCliqLux": "tatacliqLux.spoc@puma.com",
-    "Puma.com":    "pumacom.spoc@puma.com",
-    "RCB":         "",
-    "Magicpin":    "",
-    "Cred":        "",
-    "GoFynd":      "",
-    "Firstcry":    ""
-  },
+  "spoc_emails": {},
 
   "thresholds": {
     "_default": {
@@ -41,109 +25,18 @@
       "discount_min_pct":    70,
       "discount_min_orders": 10
     },
-    "Myntra": {
-      "use_global": true,
-      "spike_ratio":         1.5,
-      "spike_min_orders":    100,
-      "down_ratio":          0.5,
-      "discount_min_pct":    70,
-      "discount_min_orders": 5
-    },
-    "Amazon": {
-      "use_global": true,
-      "spike_ratio":         1.5,
-      "spike_min_orders":    100,
-      "down_ratio":          0.5,
-      "discount_min_pct":    70,
-      "discount_min_orders": 5
-    },
-    "Flipkart": {
-      "use_global": true,
-      "spike_ratio":         1.5,
-      "spike_min_orders":    100,
-      "down_ratio":          0.5,
-      "discount_min_pct":    70,
-      "discount_min_orders": 5
-    },
-    "Nykaa": {
-      "use_global": true,
-      "spike_ratio":         1.5,
-      "spike_min_orders":    100,
-      "down_ratio":          0.5,
-      "discount_min_pct":    70,
-      "discount_min_orders": 5
-    },
-    "Ajio": {
-      "use_global": true,
-      "spike_ratio":         1.5,
-      "spike_min_orders":    100,
-      "down_ratio":          0.5,
-      "discount_min_pct":    70,
-      "discount_min_orders": 5
-    },
-    "TataCliq": {
-      "use_global": true,
-      "spike_ratio":         1.5,
-      "spike_min_orders":    100,
-      "down_ratio":          0.5,
-      "discount_min_pct":    70,
-      "discount_min_orders": 5
-    },
-    "TataCliqLux": {
-      "use_global": true,
-      "spike_ratio":         1.5,
-      "spike_min_orders":    100,
-      "down_ratio":          0.5,
-      "discount_min_pct":    70,
-      "discount_min_orders": 5
-    },
-    "Puma.com": {
-      "use_global": true,
-      "spike_ratio":         1.5,
-      "spike_min_orders":    100,
-      "down_ratio":          0.5,
-      "discount_min_pct":    70,
-      "discount_min_orders": 5
-    },
-    "RCB": {
-      "use_global": true,
-      "spike_ratio":         1.5,
-      "spike_min_orders":    100,
-      "down_ratio":          0.5,
-      "discount_min_pct":    70,
-      "discount_min_orders": 5
-    },
-    "Magicpin": {
-      "use_global": true,
-      "spike_ratio":         1.5,
-      "spike_min_orders":    100,
-      "down_ratio":          0.5,
-      "discount_min_pct":    70,
-      "discount_min_orders": 5
-    },
-    "Cred": {
-      "use_global": true,
-      "spike_ratio":         1.5,
-      "spike_min_orders":    100,
-      "down_ratio":          0.5,
-      "discount_min_pct":    70,
-      "discount_min_orders": 5
-    },
-    "GoFynd": {
-      "use_global": true,
-      "spike_ratio":         1.5,
-      "spike_min_orders":    100,
-      "down_ratio":          0.5,
-      "discount_min_pct":    70,
-      "discount_min_orders": 5
-    },
-    "Firstcry": {
-      "use_global": true,
-      "spike_ratio":         1.5,
-      "spike_min_orders":    100,
-      "down_ratio":          0.5,
-      "discount_min_pct":    70,
-      "discount_min_orders": 5
-    }
+    "Myntra":      { "use_global": true, "spike_ratio": 1.5, "spike_min_orders": 50, "down_ratio": 0.5, "discount_min_pct": 70, "discount_min_orders": 10 },
+    "Amazon":      { "use_global": true, "spike_ratio": 1.5, "spike_min_orders": 50, "down_ratio": 0.5, "discount_min_pct": 70, "discount_min_orders": 10 },
+    "Flipkart":    { "use_global": true, "spike_ratio": 1.5, "spike_min_orders": 50, "down_ratio": 0.5, "discount_min_pct": 70, "discount_min_orders": 10 },
+    "Nykaa":       { "use_global": true, "spike_ratio": 1.5, "spike_min_orders": 50, "down_ratio": 0.5, "discount_min_pct": 70, "discount_min_orders": 10 },
+    "Ajio":        { "use_global": true, "spike_ratio": 1.5, "spike_min_orders": 50, "down_ratio": 0.5, "discount_min_pct": 70, "discount_min_orders": 10 },
+    "TataCliq":    { "use_global": true, "spike_ratio": 1.5, "spike_min_orders": 50, "down_ratio": 0.5, "discount_min_pct": 70, "discount_min_orders": 10 },
+    "TataCliqLux": { "use_global": true, "spike_ratio": 1.5, "spike_min_orders": 50, "down_ratio": 0.5, "discount_min_pct": 70, "discount_min_orders": 10 },
+    "Puma.com":    { "use_global": true, "spike_ratio": 1.5, "spike_min_orders": 50, "down_ratio": 0.5, "discount_min_pct": 70, "discount_min_orders": 10 },
+    "RCB":         { "use_global": true, "spike_ratio": 1.5, "spike_min_orders": 50, "down_ratio": 0.5, "discount_min_pct": 70, "discount_min_orders": 10 },
+    "Magicpin":    { "use_global": true, "spike_ratio": 1.5, "spike_min_orders": 50, "down_ratio": 0.5, "discount_min_pct": 70, "discount_min_orders": 10 },
+    "Cred":        { "use_global": true, "spike_ratio": 1.5, "spike_min_orders": 50, "down_ratio": 0.5, "discount_min_pct": 70, "discount_min_orders": 10 },
+    "GoFynd":      { "use_global": true, "spike_ratio": 1.5, "spike_min_orders": 50, "down_ratio": 0.5, "discount_min_pct": 70, "discount_min_orders": 10 },
+    "Firstcry":    { "use_global": true, "spike_ratio": 1.5, "spike_min_orders": 50, "down_ratio": 0.5, "discount_min_pct": 70, "discount_min_orders": 10 }
   }
 }
